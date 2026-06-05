@@ -20,130 +20,67 @@ services:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-1}
       OPENCLAW_DISABLE_BONJOUR: ${OPENCLAW_DISABLE_BONJOUR:-1}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
-      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-openclaw-gateway}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      TZ: ${TZ:-Asia/Shanghai}
-      PERSONAL_BRAIN_HOST: personal-brain
-      PERSONAL_BRAIN_PORT: 18000
     volumes:
-      - ${OPENCLAW_CONFIG_DIR:-./.openclaw-config}:/root/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR:-./.openclaw-workspace}:/root/.openclaw/workspace
-      - ./openclaw.json:/root/.openclaw/openclaw.json:ro
+      - ./data/openclaw:/root/.openclaw
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
-    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+      - "18001:18001"
     networks:
-      - openclaw-prod-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1.5'
-          memory: 1G
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    depends_on:
-      - personal-brain
+      - openclaw-net
 
-  # 2. 🛡️ 宿主机套接字防火墙（彻底解决跨平台权限冲突 + 限制大模型越权破坏）
+  # 2. Docker API 安全代理服务 (用于让 Agent 安全地控制沙箱和生产容器)
   docker-proxy:
     image: tecnativa/docker-socket-proxy:latest
-    container_name: docker-proxy
+    container_name: pb-docker-proxy
     restart: always
     environment:
-      - CONTAINERS=1      # 仅允许大模型管理容器状态
-      - POST=1            # 仅允许下发写操作（如重启指令）
-      - IMAGES=0          # 严格禁止大模型触碰镜像
-      - NETWORKS=0        # 严格禁止大模型动网络栈
-      - VOLUMES=0         # 严格禁止大模型窥探别的容器数据
-      - SERVICES=0        # 严格禁止动别的高级服务
+      # 放宽最小必要权限，允许 Agent 创建、销毁测试沙箱容器和清理卷
+      CONTAINERS: 1
+      IMAGES: 1
+      VOLUMES: 1
+      NETWORKS: 1
+      POST: 1
+      DELETE: 1
     volumes:
-      # 这个安全的过滤器容器直接去碰宿主机的物理 sock，天然抹平 Linux 权限与 Windows 环境差异
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - openclaw-prod-net
+      - openclaw-net
 
-  # 3. Personal Brain 容器（自进化大脑，代码全量读写 + Uvicorn 热重载）
+  # 3. Personal Brain 核心业务与控制面服务
   personal-brain:
-    build:
-      context: .
-      dockerfile: Dockerfile.pb
-    image: personal-brain:evolution-v1.0
+    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
     container_name: personal-brain
+    hostname: personal-brain
     restart: always
+    working_dir: /pb
+    # 彻底关闭 --reload 防火墙自残隐患，采用标准生产启动。后续由控制面平滑执行重启
+    command: ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "18000"]
     env_file:
       - path: .env
         required: false
     environment:
-      - TZ=${TZ:-Asia/Shanghai}
-      - PYTHONUNBUFFERED=1
-      # 🏆 核心纽带：告诉大模型容器内的 Docker 客户端，走网络套接字代理，不再直连危险的文件
-      - DOCKER_HOST=tcp://docker-proxy:2375
+      - TERM=xterm-256color
+      # 注入 Docker 代理，使容器内部的 docker-py 客户端能跟宿主机 Docker 通信
+      - DOCKER_HOST=tcp://pb-docker-proxy:2375
+      
+      # ==========================================
+      # GitHub 自动化工作流凭证管理（跨平台统一 Token 认证）
+      # ==========================================
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      # 远程仓库地址示例：github.com/your_username/your_repo
+      - GITHUB_REPO_URL=${GITHUB_REPO_URL}
+      # 配置 Agent 专属提交者信息，不再依赖宿主机的 .gitconfig
+      - GIT_AUTHOR_NAME=OpenClaw-Agent
+      - GIT_AUTHOR_EMAIL=agent@openclaw.io
     volumes:
-      - .:/pb:rw # 必须读写，供大模型改写代码
-      - ${PERSONAL_BRAIN_DATA_DIR:-./data}:/pb/data
-      - ~/.gitconfig:/root/.gitconfig:ro
-      - ~/.ssh:/root/.ssh:ro
-    command: ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "18000", "--reload"]
+      # 挂载工作目录，便于代码实时覆写与本地持久化
+      - .:/pb:rw
+    ports:
+      - "18000:18000"
     networks:
-      - openclaw-prod-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1.5'
-          memory: 1G
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:18000/health')\" || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
+      - openclaw-net
     depends_on:
       - docker-proxy
 
-  # 4. OpenClaw 命令行运维交互工具
-  openclaw-cli:
-    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
-    container_name: openclaw-cli
-    restart: "no" # 独立工具，无需常驻和自动重启
-    user: root
-    init: true
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      HOME: /root
-      OPENCLAW_HOME: /root
-      TERM: xterm-256color
-      OPENCLAW_STATE_DIR: /root/.openclaw
-      OPENCLAW_CONFIG_PATH: /root/.openclaw/openclaw.json
-      OPENCLAW_CONFIG_DIR: /root/.openclaw
-      OPENCLAW_WORKSPACE_DIR: /root/.openclaw/workspace
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-1}
-      BROWSER: echo
-      MOONSHOT_API_KEY: ${MOONSHOT_API_KEY:-}
-      TZ: ${TZ:-Asia/Shanghai}
-    volumes:
-      - ${OPENCLAW_CONFIG_DIR:-./.openclaw-config}:/root/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR:-./.openclaw-workspace}:/root/.openclaw/workspace
-      - ./openclaw.json:/root/.openclaw/openclaw.json:ro
-    networks:
-      - openclaw-prod-net
-    stdin_open: true
-    tty: true
-    command: ["node", "openclaw.mjs"]
-    profiles:
-      - cli
-    depends_on:
-      - openclaw-gateway
-
 networks:
-  openclaw-prod-net:
+  openclaw-net:
     driver: bridge
-    name: openclaw-prod-net
