@@ -1,18 +1,10 @@
-# OpenClaw + Personal Brain Docker Compose 部署配置
-# LLM 模型使用 Kimi Code
-#
-# 使用方法:
-#   1. 复制 .env.example 为 .env，填写必要配置
-#   2. docker compose up -d
-#   3. 访问 Web UI: http://localhost:18789
-#   4. Personal Brain API: http://localhost:18000
-
 services:
+  # 1. OpenClaw 网关服务（高可用、高隔离版）
   openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:latest
+    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
     container_name: openclaw-gateway
     hostname: openclaw-gateway
-    restart: unless-stopped
+    restart: always
     user: root
     env_file:
       - path: .env
@@ -25,67 +17,102 @@ services:
       OPENCLAW_CONFIG_PATH: /root/.openclaw/openclaw.json
       OPENCLAW_CONFIG_DIR: /root/.openclaw
       OPENCLAW_WORKSPACE_DIR: /root/.openclaw/workspace
-      # Gateway 认证令牌（必须设置，否则无法绑定到 0.0.0.0）
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-1}
       OPENCLAW_DISABLE_BONJOUR: ${OPENCLAW_DISABLE_BONJOUR:-1}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-openclaw-gateway}
-      # Anthropic API Key（通过 Kimi Code 代理）
       ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
-      # 其他可选提供商密钥
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
-      PERSONAL_BRAIN_HOST: 0.0.0.0
+      PERSONAL_BRAIN_HOST: personal-brain
       PERSONAL_BRAIN_PORT: 18000
-      PYTHONUNBUFFERED: "1"
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-./.openclaw-config}:/root/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-./.openclaw-workspace}:/root/.openclaw/workspace
       - ./openclaw.json:/root/.openclaw/openclaw.json:ro
-      - .:/pb:rw
-      - ${PERSONAL_BRAIN_DATA_DIR:-./data}:/pb/data
-    cap_drop:
-      - NET_RAW
-      - NET_ADMIN
-    security_opt:
-      - no-new-privileges:true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     ports:
       - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
       - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
-      # 注意：Personal Brain API (18000) 不映射到宿主机，仅容器内部访问
-      # OpenClaw 通过容器内 localhost:18000 调用 API
-    command: >
-      sh -c '
-      echo "[Personal Brain] 安装 Python 依赖...";
-      apt-get update -qq && apt-get install -y -qq python3-pip &&
-      pip3 install --break-system-packages --no-cache-dir sqlalchemy==2.0.49 fastapi uvicorn pydantic;
-      echo "[Personal Brain] Python 依赖安装完成";
-      echo "[Personal Brain] 启动 HTTP API 服务...";
-      cd /pb && python3 api_server.py &
-      echo "[Personal Brain] 服务已启动在 http://0.0.0.0:18000";
-      echo "[OpenClaw] 启动 Gateway...";
-      cd /app && exec node openclaw.mjs gateway --bind lan --port 18789
-      '
+    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+    networks:
+      - openclaw-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\" && python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:18000/health')\"",
-        ]
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+    depends_on:
+      - personal-brain
 
+  # 2. 🛡️ 宿主机套接字防火墙（彻底解决跨平台权限冲突 + 限制大模型越权破坏）
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-proxy
+    restart: always
+    environment:
+      - CONTAINERS=1      # 仅允许大模型管理容器状态
+      - POST=1            # 仅允许下发写操作（如重启指令）
+      - IMAGES=0          # 严格禁止大模型触碰镜像
+      - NETWORKS=0        # 严格禁止大模型动网络栈
+      - VOLUMES=0         # 严格禁止大模型窥探别的容器数据
+      - SERVICES=0        # 严格禁止动别的高级服务
+    volumes:
+      # 这个安全的过滤器容器直接去碰宿主机的物理 sock，天然抹平 Linux 权限与 Windows 环境差异
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - openclaw-prod-net
+
+  # 3. Personal Brain 容器（自进化大脑，代码全量读写 + Uvicorn 热重载）
+  personal-brain:
+    build:
+      context: .
+      dockerfile: Dockerfile.pb
+    image: personal-brain:evolution-v1.0
+    container_name: personal-brain
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - PYTHONUNBUFFERED=1
+      # 🏆 核心纽带：告诉大模型容器内的 Docker 客户端，走网络套接字代理，不再直连危险的文件
+      - DOCKER_HOST=tcp://docker-proxy:2375
+    volumes:
+      - .:/pb:rw # 必须读写，供大模型改写代码
+      - ${PERSONAL_BRAIN_DATA_DIR:-./data}:/pb/data
+      - ~/.gitconfig:/root/.gitconfig:ro
+      - ~/.ssh:/root/.ssh:ro
+    command: ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "18000", "--reload"]
+    networks:
+      - openclaw-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:18000/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - docker-proxy
+
+  # 4. OpenClaw 命令行运维交互工具
   openclaw-cli:
-    image: ghcr.io/openclaw/openclaw:latest
+    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
     container_name: openclaw-cli
-    network_mode: "service:openclaw-gateway"
+    restart: "no" # 独立工具，无需常驻和自动重启
     user: root
+    init: true
     env_file:
       - path: .env
         required: false
@@ -106,16 +133,10 @@ services:
       - ${OPENCLAW_CONFIG_DIR:-./.openclaw-config}:/root/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-./.openclaw-workspace}:/root/.openclaw/workspace
       - ./openclaw.json:/root/.openclaw/openclaw.json:ro
-      - .:/pb:rw
-      - ${PERSONAL_BRAIN_DATA_DIR:-./data}:/pb/data
-    cap_drop:
-      - NET_RAW
-      - NET_ADMIN
-    security_opt:
-      - no-new-privileges:true
+    networks:
+      - openclaw-prod-net
     stdin_open: true
     tty: true
-    entrypoint: ["tini", "-s", "--"]
     command: ["node", "openclaw.mjs"]
     profiles:
       - cli
@@ -123,8 +144,6 @@ services:
       - openclaw-gateway
 
 networks:
-  openclaw-net:
+  openclaw-prod-net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
+    name: openclaw-prod-net
