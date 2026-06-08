@@ -10,7 +10,7 @@ OpenClaw - Personal Brain 统一 REST API 路由网关
 import os
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
-from code_manager import code_manager
+from src.code_manager import code_manager
 
 app = FastAPI(
     title="Personal Brain REST API Gate",

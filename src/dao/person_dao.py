@@ -6,7 +6,7 @@
 """
 
 from typing import List, Optional, Dict, Any
-from db_model.base_model import get_db_session, Person
+from src.db_model.base_model import get_db_session, Person
 
 
 class PersonDAO:

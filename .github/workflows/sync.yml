@@ -1,0 +1,72 @@
+name: Sync GHCR Image to Aliyun
+
+on:
+  workflow_dispatch: # 支持手动触发
+  schedule:
+    - cron: '0 0 * * *' # 每天午夜自动同步一次，保证 latest 是最新的
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+    # 1. 登录 GHCR
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    # 2. 登录阿里云北京个人版仓库
+    - name: Login to Aliyun ACR
+      uses: docker/login-action@v3
+      with:
+        registry: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com
+        username: ${{ secrets.ALIYUN_USERNAME }}
+        password: ${{ secrets.ALIYUN_PASSWORD }}
+
+    # 3. 核心三步走：循环拉取、改标签、推送
+    - name: Pull, Tag and Push Multiple Images
+      run: |
+        # 定义需要同步的镜像名数组
+        IMAGES=("openclaw" "opencode")
+        
+        REGISTRY_ALIYUN="crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com"
+        NAMESPACE="openclaw_gateway"
+        
+        for IMAGE in "${IMAGES[@]}"; do
+          echo "--------------------------------------------------------"
+          echo "开始同步镜像: ${IMAGE}:latest"
+          echo "--------------------------------------------------------"
+          
+          # 1. 拉取原始镜像
+          echo "正在拉取: ghcr.io/openclaw/${IMAGE}:latest"
+          docker pull ghcr.io/openclaw/${IMAGE}:latest
+          
+          # 2. 修改 Tag
+          echo "正在修改 Tag..."
+          docker tag ghcr.io/openclaw/${IMAGE}:latest ${REGISTRY_ALIYUN}/${NAMESPACE}/${IMAGE}:latest
+          
+          # 3. 推送到阿里云
+          echo "正在推送到阿里云..."
+          docker push ${REGISTRY_ALIYUN}/${NAMESPACE}/${IMAGE}:latest
+          
+          echo "镜像 ${IMAGE}:latest 同步完成！"
+        done
+
+    # 4. 运行日志无痕自毁
+    - name: Self Destruct Action Logs
+      if: always() # 确保无论成功还是失败，都执行删除
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh cli 需要明确传入 token 才能在非交互环境调用 API
+      run: |
+        echo "=== 正在触发无痕自毁程序 ==="
+        
+        # 使用 GitHub 官方提供的专用 CLI 工具 (gh)，直接对当前 Run ID 发起删除请求
+        gh api \
+          --method DELETE \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          /repos/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+        echo "=== 自毁指令已发出 ==="

@@ -14,9 +14,9 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from db_model.base_model import init_database
-from event_bus import event_bus
-from interaction.interaction_layer import InteractionLayer
+from src.db_model.base_model import init_database
+from src.event_bus import event_bus
+from src.interaction.interaction_layer import InteractionLayer
 
 
 def initialize_system():
@@ -50,12 +50,12 @@ def initialize_system():
     print("\n【初始化】正在加载各层级模块...")
     try:
         # 导入并初始化各层级（延迟导入确保路径正确）
-        from dao.person_dao import PersonDAO
-        from dao.task_dao import TaskDAO
-        from service.person_service import PersonService
-        from service.task_service import TaskService
-        from agent.person_agent import PersonAgent
-        from agent.task_agent import TaskAgent
+        from src.dao.person_dao import PersonDAO
+        from src.dao.task_dao import TaskDAO
+        from src.service.person_service import PersonService
+        from src.service.task_service import TaskService
+        from src.agent.person_agent import PersonAgent
+        from src.agent.task_agent import TaskAgent
 
         # 创建各层级实例（建立调用链）
         person_dao = PersonDAO()

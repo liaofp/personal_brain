@@ -8,8 +8,8 @@
 """
 
 from typing import Dict, Any
-from service.person_service import PersonService
-from event_bus import event_bus
+from src.service.person_service import PersonService
+from src.event_bus import event_bus
 
 
 class PersonAgent:

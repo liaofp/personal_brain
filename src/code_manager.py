@@ -15,7 +15,7 @@ import subprocess
 from typing import Tuple, Dict, Any
 import docker
 
-from event_bus import (
+from src.event_bus import (
     event_bus,
     EVENT_CODE_EVOLUTION_START,
     EVENT_LOCK_ACQUIRED,

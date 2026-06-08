@@ -1,86 +1,64 @@
 services:
-  # 1. OpenClaw 网关服务（高可用、高隔离版）
-  openclaw-gateway:
-    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
-    container_name: openclaw-gateway
-    hostname: openclaw-gateway
-    restart: always
-    user: root
+  # 1. 业务运行时（FastAPI 生产容器：无 ports 映射，仅在内网暴露）
+  brain_app:
+    image: python:3.11-slim
+    container_name: brain_app_runtime
     env_file:
-      - path: .env
-        required: false
-    environment:
-      HOME: /root
-      OPENCLAW_HOME: /root
-      TERM: xterm-256color
-      OPENCLAW_STATE_DIR: /root/.openclaw
-      OPENCLAW_CONFIG_PATH: /root/.openclaw/openclaw.json
-      OPENCLAW_CONFIG_DIR: /root/.openclaw
-      OPENCLAW_WORKSPACE_DIR: /root/.openclaw/workspace
-      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
-      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-1}
-      OPENCLAW_DISABLE_BONJOUR: ${OPENCLAW_DISABLE_BONJOUR:-1}
+      - .env
     volumes:
-      - ./data/openclaw:/root/.openclaw
-    ports:
-      - "18001:18001"
+      - ./src:/workspace/src
+      - .env:/workspace/src/.env
+    working_dir: /workspace/src
+    expose:
+      - "${BRAIN_APP_PORT}"
+    # 生产级常驻进程，支持接收 SIGHUP 信号优雅热重载
+    command: >
+      bash -c "pip install fastapi uvicorn sqlalchemy && 
+      uvicorn main.py --host 0.0.0.0 --port ${BRAIN_APP_PORT}"
     networks:
-      - openclaw-net
-
-  # 2. Docker API 安全代理服务 (用于让 Agent 安全地控制沙箱和生产容器)
-  docker-proxy:
-    image: tecnativa/docker-socket-proxy:latest
-    container_name: pb-docker-proxy
+      - brain_net
     restart: always
-    environment:
-      # 放宽最小必要权限，允许 Agent 创建、销毁测试沙箱容器和清理卷
-      CONTAINERS: 1
-      IMAGES: 1
-      VOLUMES: 1
-      NETWORKS: 1
-      POST: 1
-      DELETE: 1
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - openclaw-net
 
-  # 3. Personal Brain 核心业务与控制面服务
-  personal-brain:
-    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
-    container_name: personal-brain
-    hostname: personal-brain
-    restart: always
-    working_dir: /pb
-    # 彻底关闭 --reload 防火墙自残隐患，采用标准生产启动。后续由控制面平滑执行重启
-    command: ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "18000"]
+  # 2. OpenCode 自动化编译与构建智能体
+  opencode:
+    image: ghcr.io/anomalyco/opencode:latest
+    container_name: brain_opencode
     env_file:
-      - path: .env
-        required: false
-    environment:
-      - TERM=xterm-256color
-      # 注入 Docker 代理，使容器内部的 docker-py 客户端能跟宿主机 Docker 通信
-      - DOCKER_HOST=tcp://pb-docker-proxy:2375
-      
-      # ==========================================
-      # GitHub 自动化工作流凭证管理（跨平台统一 Token 认证）
-      # ==========================================
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      # 远程仓库地址示例：github.com/your_username/your_repo
-      - GITHUB_REPO_URL=${GITHUB_REPO_URL}
-      # 配置 Agent 专属提交者信息，不再依赖宿主机的 .gitconfig
-      - GIT_AUTHOR_NAME=OpenClaw-Agent
-      - GIT_AUTHOR_EMAIL=agent@openclaw.io
+      - .env
     volumes:
-      # 挂载工作目录，便于代码实时覆写与本地持久化
-      - .:/pb:rw
-    ports:
-      - "18000:18000"
+      - .:/workspace
+      - ./opencode_config.json:/root/.config/opencode/config.json
+    working_dir: /workspace/src
+    tty: true
+    stdin_open: true
+    command: >
+      bash -c "git config --global user.name 'BrainAgent' &&
+      git config --global user.email 'agent@brain.local' &&
+      tail -f /dev/null"
     networks:
-      - openclaw-net
+      - brain_net
+
+  # 3. OpenClaw 核心网关（唯一向外交付的 WebUI 入口）
+  openclaw:
+    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
+    container_name: brain_openclaw
+    ports:
+      - "${OPENCLAW_UI_PORT}:${OPENCLAW_UI_PORT}"
+    env_file:
+      - .env
+    environment:
+      - OPENCLAW_CONFIG_PATH=/app/config/openclaw.json
+    volumes:
+      - .:/workspace
+      - ./openclaw.json:/app/config/openclaw.json
+      - ./AGENTS.md:/app/config/AGENTS.md:ro
+    working_dir: /workspace/src
     depends_on:
-      - docker-proxy
+      - brain_app
+      - opencode
+    networks:
+      - brain_net
 
 networks:
-  openclaw-net:
+  brain_net:
     driver: bridge

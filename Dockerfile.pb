@@ -1,7 +1,7 @@
-FROM python:3.11-slim
+FROM docker.m.daocloud.io/library/python:3.11-slim
 WORKDIR /pb
 ENV TZ=Asia/Shanghai \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 # 🏆 进化点 1：必须在镜像内安装 git 和 openssh，否则大模型无法 commit 和 push

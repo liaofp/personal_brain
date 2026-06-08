@@ -7,7 +7,7 @@
 """
 
 from typing import Dict, Any, List, Optional
-from dao.person_dao import PersonDAO
+from src.dao.person_dao import PersonDAO
 
 
 class PersonService:

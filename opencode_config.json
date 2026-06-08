@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "shell": "/bin/bash",
+  "logLevel": "INFO",
+  "model": "openai/deepseek-coder",
+  "small_model": "openai/deepseek-coder",
+  "providers": {
+    "openai": {
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "base_url": "${DEEPSEEK_BASE_URL}"
+    }
+  },
+  "git": {
+    "autocommit": true, 
+    "track": true
+  },
+  "experimental": {
+    "fs_snapshot": true 
+  }
+}

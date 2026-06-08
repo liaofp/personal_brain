@@ -7,7 +7,7 @@
 """
 
 from typing import Dict, Any, List, Optional
-from dao.task_dao import TaskDAO
+from src.dao.task_dao import TaskDAO
 
 
 class TaskService:

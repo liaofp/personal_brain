@@ -12,7 +12,7 @@ import threading
 import logging
 from typing import Dict, Any
 
-from event_bus import (
+from src.event_bus import (
     event_bus,
     EVENT_CODE_EVOLUTION_START,
     EVENT_LOCK_ACQUIRED,
@@ -23,7 +23,7 @@ from event_bus import (
     EVENT_GIT_PUSH_SUCCESS,
     EVENT_CONTAINER_RESTARTING
 )
-from code_manager import CodeEvolutionManager
+from src.code_manager import CodeEvolutionManager
 
 # 初始化日志
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")

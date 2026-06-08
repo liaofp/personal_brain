@@ -7,7 +7,7 @@
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from db_model.base_model import get_db_session, Task
+from src.db_model.base_model import get_db_session, Task
 
 
 class TaskDAO:

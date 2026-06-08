@@ -8,8 +8,8 @@
 """
 
 from typing import Dict, Any
-from service.task_service import TaskService
-from event_bus import event_bus
+from src.service.task_service import TaskService
+from src.event_bus import event_bus
 
 
 class TaskAgent:
