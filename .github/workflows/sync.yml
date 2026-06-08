@@ -25,40 +25,48 @@ jobs:
         username: ${{ secrets.ALIYUN_USERNAME }}
         password: ${{ secrets.ALIYUN_PASSWORD }}
 
-    # 3. 核心三步走：循环拉取、改标签、推送
+    # 3. 核心三步走：解析不同来源的镜像并同步
     - name: Pull, Tag and Push Multiple Images
       run: |
-        # 定义需要同步的镜像名数组
-        IMAGES=("openclaw" "opencode")
+        # 定义镜像对应关系，格式为 "源镜像完整地址|阿里云目标镜像名"
+        IMAGES=(
+          "ghcr.io/openclaw/openclaw:latest|openclaw"
+          "ghcr.io/anomalyco/opencode:latest|opencode"
+        )
         
         REGISTRY_ALIYUN="crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com"
         NAMESPACE="openclaw_gateway"
         
-        for IMAGE in "${IMAGES[@]}"; do
+        for ITEM in "${IMAGES[@]}"; do
+          # 使用 | 作为分隔符，拆分出源地址和目标名
+          SOURCE_IMAGE=$(echo "$ITEM" | cut -d'|' -f1)
+          TARGET_NAME=$(echo "$ITEM" | cut -d'|' -f2)
+          
           echo "--------------------------------------------------------"
-          echo "开始同步镜像: ${IMAGE}:latest"
+          echo "开始同步: ${SOURCE_IMAGE} -> ${TARGET_NAME}:latest"
           echo "--------------------------------------------------------"
           
           # 1. 拉取原始镜像
-          echo "正在拉取: ghcr.io/openclaw/${IMAGE}:latest"
-          docker pull ghcr.io/openclaw/${IMAGE}:latest
+          echo "正在拉取: ${SOURCE_IMAGE}"
+          docker pull ${SOURCE_IMAGE}
           
           # 2. 修改 Tag
-          echo "正在修改 Tag..."
-          docker tag ghcr.io/openclaw/${IMAGE}:latest ${REGISTRY_ALIYUN}/${NAMESPACE}/${IMAGE}:latest
+          TARGET_IMAGE="${REGISTRY_ALIYUN}/${NAMESPACE}/${TARGET_NAME}:latest"
+          echo "正在修改 Tag 为: ${TARGET_IMAGE}"
+          docker tag ${SOURCE_IMAGE} ${TARGET_IMAGE}
           
           # 3. 推送到阿里云
           echo "正在推送到阿里云..."
-          docker push ${REGISTRY_ALIYUN}/${NAMESPACE}/${IMAGE}:latest
+          docker push ${TARGET_IMAGE}
           
-          echo "镜像 ${IMAGE}:latest 同步完成！"
+          echo "✅ ${TARGET_NAME} 同步完成！"
         done
 
     # 4. 运行日志无痕自毁
     - name: Self Destruct Action Logs
       if: always() # 确保无论成功还是失败，都执行删除
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh cli 需要明确传入 token 才能在非交互环境调用 API
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "=== 正在触发无痕自毁程序 ==="
         
