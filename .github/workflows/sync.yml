@@ -32,6 +32,7 @@ jobs:
         IMAGES=(
           "ghcr.io/openclaw/openclaw:latest|openclaw"
           "ghcr.io/anomalyco/opencode:latest|opencode"
+          "docker.io/library/python:3.12-slim|python:3.12-slim"
         )
         
         REGISTRY_ALIYUN="crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com"
@@ -64,17 +65,11 @@ jobs:
 
     # 4. 运行日志无痕自毁
     - name: Self Destruct Action Logs
-      if: always() # 确保无论成功还是失败，都执行删除
+      if: always() 
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "=== 正在触发无痕自毁程序 ==="
         
-        # 使用 GitHub 官方提供的专用 CLI 工具 (gh)，直接对当前 Run ID 发起删除请求
-        gh api \
-          --method DELETE \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          /repos/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          
+        gh run delete ${{ github.run_id }}
         echo "=== 自毁指令已发出 ==="

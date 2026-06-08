@@ -1,7 +1,7 @@
 services:
   # 1. 业务运行时（FastAPI 生产容器：无 ports 映射，仅在内网暴露）
   brain_app:
-    image: python:3.11-slim
+    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/python:3.12-slim
     container_name: brain_app_runtime
     env_file:
       - .env
@@ -21,7 +21,7 @@ services:
 
   # 2. OpenCode 自动化编译与构建智能体
   opencode:
-    image: ghcr.io/anomalyco/opencode:latest
+    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/opencode:latest
     container_name: brain_opencode
     env_file:
       - .env
