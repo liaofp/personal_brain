@@ -5,57 +5,45 @@
       "port": 8080
     }
   },
-  
   "models": {
     "deepseek-coder": {
-      "provider": "deepseek", 
+      "provider": "deepseek",
       "api_key": "${env.DEEPSEEK_API_KEY}",
       "base_url": "${env.DEEPSEEK_BASE_URL}",
       "model_name": "deepseek-coder"
     }
   },
-
   "agents": {
     "brain_router": {
       "model": "deepseek-coder",
-      "system_prompt_file": "/app/config/AGENTS.md", 
+      "system_prompt_file": "/app/config/AGENTS.md",
       "tools": ["group:fs", "group:runtime", "full_pipeline_command", "execute_brain_feature"]
     }
   },
-
   "tools": {
-    "sandbox": {
-      "mode": "all"
-    },
+    "sandbox": { "mode": "all" },
     "commands": {
       "full_pipeline_command": {
-        "description": "当用户需要修改代码、改进优化或添加新功能时触发。驱动底层 OpenCode 依次执行：依据五层约束规划设计、自动化编码、沙箱测试。测试通过后对常驻容器进行事务级重启并提交代码。",
+        "description": "严格遵循：规划 -> 依赖对齐 -> 自动编码 -> 单元测试 -> 无损重启。",
         "parameters": {
           "type": "object",
           "properties": {
-            "target_layer": {
-              "type": "string",
-              "enum": ["agent", "service", "dao", "model"],
-              "description": "本次修改核心触达的五层架构层级，用于动态裁剪上下文，极其重要"
-            },
-            "user_requirement": { 
-              "type": "string", 
-              "description": "具体的业务功能演进需求说明" 
-            }
+            "target_layer": { "type": "string", "enum": ["agent", "service", "dao", "model"] },
+            "required_packages": { "type": "string", "description": "规划阶段确定的、本次新增功能需要补全的第三方库名，多个用空格隔开。若无则填 empty" },
+            "user_requirement": { "type": "string" }
           },
-          "required": ["target_layer", "user_requirement"]
+          "required": ["target_layer", "required_packages", "user_requirement"]
         },
-        "command": "python3 -c \"import sys; text=open('/app/config/AGENTS.md').read(); sections=[s for s in text.split('##') if '{{target_layer}}' in s.lower() or '基本项目定位' in s]; open('/tmp/ctx.txt', 'w').write('\\n'.join(sections))\" && docker exec -w /workspace/src brain_opencode opencode build --context /tmp/ctx.txt --message \"{{user_requirement}}\" && docker exec brain_app_runtime pkill -HUP uvicorn"
+        "command": "python3 -c \"import sys; text=open('/app/config/AGENTS.md').read(); sections=[s for s in text.split('##') if '{{target_layer}}' in s.lower() or '基本项目定位' in s]; open('/tmp/ctx.txt', 'w').write('\\n'.join(sections))\" && if [ \"{{required_packages}}\" != \"empty\" ]; then docker exec -w /workspace/src brain_opencode bash -c \"uv pip install {{required_packages}} && echo '{{required_packages}}' >> requirements.txt\"; fi && docker exec -w /workspace/src brain_opencode opencode build --context /tmp/ctx.txt --message \"{{user_requirement}}\" && docker restart brain_app_runtime"
       },
-
       "execute_brain_feature": {
-        "description": "在 Docker 内部封闭网络中，通过标准 HTTP 路由直接触发并调用常驻的 FastAPI 业务服务。",
+        "description": "调用业务接口",
         "parameters": {
           "type": "object",
           "properties": {
-            "path": { "type": "string", "description": "业务接口路径，例如 /api/v1/tasks" },
-            "method": { "type": "string", "description": "GET 或 POST" },
-            "payload": { "type": "string", "description": "JSON 字符串格式的请求体" }
+            "path": { "type": "string" },
+            "method": { "type": "string" },
+            "payload": { "type": "string" }
           },
           "required": ["path", "method"]
         },

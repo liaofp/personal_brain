@@ -1,20 +1,21 @@
 services:
   # 1. 业务运行时（FastAPI 生产容器：无 ports 映射，仅在内网暴露）
   brain_app:
-    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/python:3.12-slim
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: brain_app_runtime
     env_file:
       - .env
     volumes:
       - ./src:/workspace/src
       - .env:/workspace/src/.env
+      - ./.venv:/workspace/src/.venv
     working_dir: /workspace/src
     expose:
       - "${BRAIN_APP_PORT}"
     # 生产级常驻进程，支持接收 SIGHUP 信号优雅热重载
-    command: >
-      bash -c "pip install fastapi uvicorn sqlalchemy && 
-      uvicorn main.py --host 0.0.0.0 --port ${BRAIN_APP_PORT}"
+    command: uvicorn main:app --host 0.0.0.0 --port ${BRAIN_APP_PORT}"
     networks:
       - brain_net
     restart: always
@@ -53,9 +54,6 @@ services:
       - ./openclaw.json:/app/config/openclaw.json
       - ./AGENTS.md:/app/config/AGENTS.md:ro
     working_dir: /workspace/src
-    depends_on:
-      - brain_app
-      - opencode
     networks:
       - brain_net
 

@@ -2,7 +2,7 @@
 
 严格依照架构、层级功能、流转规则、技术规范，产出完整可运行Python工程代码。
 
-适配环境：Windows10 + Python + SQLAlchemy + SQLite
+适配环境：Python + SQLAlchemy + SQLite
 架构层级：人机交互层→Agent智能代理层→Service业务服务层→DAO数据访问层→数据库基础模型层
 运行模式：同步业务调用、异步事件联动双机制并行
 

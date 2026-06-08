@@ -33,6 +33,7 @@ jobs:
           "ghcr.io/openclaw/openclaw:latest"
           "ghcr.io/anomalyco/opencode:latest"
           "docker.io/library/python:3.12-slim"
+          "ghcr.io/astral-sh/uv:latest"
         )
         
         REGISTRY_ALIYUN="crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com"
@@ -70,5 +71,5 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "=== 正在触发无痕自毁程序 ==="
-        gh run delete ${{ github.run_id }}
+        gh run delete ${{ github.run_id }} --repo ${{ github.repository }}
         echo "=== 自毁指令已发出 ==="
