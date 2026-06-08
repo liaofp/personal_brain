@@ -25,34 +25,34 @@ jobs:
         username: ${{ secrets.ALIYUN_USERNAME }}
         password: ${{ secrets.ALIYUN_PASSWORD }}
 
-    # 3. 核心三步走：解析不同来源的镜像并同步
+    # 3. 核心同步逻辑：自动截取反斜线右侧内容
     - name: Pull, Tag and Push Multiple Images
       run: |
-        # 定义镜像对应关系，格式为 "源镜像完整地址|阿里云目标镜像名"
+        # 现在的数组只需要纯粹的源镜像完整地址即可，去掉了硬编码的管道符 |
         IMAGES=(
-          "ghcr.io/openclaw/openclaw:latest|openclaw"
-          "ghcr.io/anomalyco/opencode:latest|opencode"
-          "docker.io/library/python:3.12-slim|python:3.12-slim"
+          "ghcr.io/openclaw/openclaw:latest"
+          "ghcr.io/anomalyco/opencode:latest"
+          "docker.io/library/python:3.12-slim"
         )
         
         REGISTRY_ALIYUN="crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com"
         NAMESPACE="openclaw_gateway"
         
-        for ITEM in "${IMAGES[@]}"; do
-          # 使用 | 作为分隔符，拆分出源地址和目标名
-          SOURCE_IMAGE=$(echo "$ITEM" | cut -d'|' -f1)
-          TARGET_NAME=$(echo "$ITEM" | cut -d'|' -f2)
+        for SOURCE_IMAGE in "${IMAGES[@]}"; do
+          # 使用 Shell 内置的字符串替换 ${var##*/} 
+          # 它的作用是：删掉从左往右直到最后一个反斜线 / 的所有内容，只留下右边的部分
+          TARGET_NAME=${SOURCE_IMAGE##*/}
           
           echo "--------------------------------------------------------"
-          echo "开始同步: ${SOURCE_IMAGE} -> ${TARGET_NAME}:latest"
+          echo "开始同步: ${SOURCE_IMAGE} -> ${TARGET_NAME}"
           echo "--------------------------------------------------------"
           
           # 1. 拉取原始镜像
           echo "正在拉取: ${SOURCE_IMAGE}"
           docker pull ${SOURCE_IMAGE}
           
-          # 2. 修改 Tag
-          TARGET_IMAGE="${REGISTRY_ALIYUN}/${NAMESPACE}/${TARGET_NAME}:latest"
+          # 2. 修改 Tag（注意：这里去掉了原本写死的 :latest，因为 TARGET_NAME 自带了 Tag 标签）
+          TARGET_IMAGE="${REGISTRY_ALIYUN}/${NAMESPACE}/${TARGET_NAME}"
           echo "正在修改 Tag 为: ${TARGET_IMAGE}"
           docker tag ${SOURCE_IMAGE} ${TARGET_IMAGE}
           
@@ -70,6 +70,5 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "=== 正在触发无痕自毁程序 ==="
-        
         gh run delete ${{ github.run_id }}
         echo "=== 自毁指令已发出 ==="
