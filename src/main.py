@@ -1,3 +1,12 @@
+# ==========================================
+# File: code_manager.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+OpenClaw 核心控制面：代码安全进化管理器
+管理原子级排他锁、影子沙箱测试、Token版Git自动化流水线及容器自愈热重启。
+"""
+
 from fastapi import FastAPI
 import uvicorn
 import signal
@@ -15,19 +24,8 @@ async def health_check():
 
 if __name__ == "__main__":
     # 生产模式下由 docker-compose 的 command 启动，此处保留本地调试能力
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("src.main:app", host="0.0.0.0", port=8000)
 
-# ==========================================
-# File: src/code_manager.py
-# ==========================================
-# ==========================================
-# File: code_manager.py
-# ==========================================
-# -*- coding: utf-8 -*-
-"""
-OpenClaw 核心控制面：代码安全进化管理器
-管理原子级排他锁、影子沙箱测试、Token版Git自动化流水线及容器自愈热重启。
-"""
 
 import os
 import shutil

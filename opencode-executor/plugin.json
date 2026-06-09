@@ -16,7 +16,7 @@
             "target_file": { "type": "string", "description": "目标修改文件相对路径，例如 src/service/task_service.py" },
             "new_content": { "type": "string", "description": "LLM 思考后生成的、完整的、全量的全新文件代码内容" }
           },
-          "required": ["target_file", "new_content"]
+          "required": ["target_file", "instruction"]
         }
       }
     ]

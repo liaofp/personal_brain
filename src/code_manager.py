@@ -43,19 +43,21 @@ class CodeEvolutionManager:
                 cls._instance._initialized = False
             return cls._instance
 
-    def __init__(self, workspace_dir: str = "/pb", sandbox_base_dir: str = "/tmp/pb_sandbox"):
+    def __init__(
+    self,
+    workspace_dir: str = "/workspace",          # ✅ 修复：原默认值 "/pb" 与实际挂载不符
+    sandbox_base_dir: str = "/tmp/pb_sandbox",
+    ):
         if self._initialized:
             return
-        self.workspace_dir = workspace_dir
+        self.workspace_dir    = workspace_dir
         self.sandbox_base_dir = sandbox_base_dir
-        
-        # 🏆 核心物理/内存双重保障排他锁
-        self._state_lock = threading.Lock()
-        self.is_evolving = False  # 互斥状态标志位
-        
-        # 初始化 Docker 客户端（完美通过 DOCKER_HOST 环境变量走 docker-proxy 通信）
+        self.sandbox_image = os.getenv("SANDBOX_IMAGE", "personal_brain_runtime_base:latest") 
+        self.sandbox_bind_path = os.getenv("SANDBOX_WORKSPACE_BIND", "/workspace")
+        self._state_lock    = threading.Lock()
+        self.is_evolving    = False
         self._docker_client = None
-        self._initialized = True
+        self._initialized   = True
 
     @property
     def docker_client(self):
@@ -66,14 +68,14 @@ class CodeEvolutionManager:
                 logger.error(f"无法初始化 Docker 客户端，请检查 DOCKER_HOST 或 docker-proxy 状态: {e}")
         return self._docker_client
 
-    def acquire_lock(self) -> bool:
+    def acquire_lock(self, user: str = "unknown") -> bool:
         """
         尝试抢占全局代码修改排他锁（非阻塞模式）
         """
         with self._state_lock:
             if self.is_evolving:
-                logger.warning("加锁失败: 当前已有其他并发任务或用户正在修改维护代码。")
-                event_bus.publish(EVENT_LOCK_FAILED, "已有其他用户或Agent线程正在修改代码，本次抢锁被拦截。")
+                logger.warning(f"加锁失败: 当前已有其他并发任务或用户 ({user}) 正在修改维护代码。")
+                event_bus.publish(EVENT_LOCK_FAILED, f"已有其他用户或Agent线程正在修改代码，本次抢锁被拦截。")
                 return False
             self.is_evolving = True
             logger.info("全局代码修改排他锁抢占成功。")
@@ -124,14 +126,12 @@ class CodeEvolutionManager:
             event_bus.publish(EVENT_SANDBOX_START, f"拉起影子沙箱容器，对 {target_rel_path} 触发单元与回归测试...")
             
             if self.docker_client:
-                # 动态以只读模式（ro）挂载影子代码目录到临时容器中跑测试
-                # network_mode="none" 彻底切断测试网络，完全防御大模型反弹Shell或恶意投毒行为
                 self.docker_client.containers.run(
-                    image="personal-brain:evolution-v1.0", # 配合 docker-compose 构建的本地生产镜像
-                    command=["pytest", "/pb"],
-                    volumes={self.sandbox_base_dir: {'bind': '/pb', 'mode': 'ro'}},
+                    image=self.sandbox_image,
+                    command=["pytest", self.sandbox_bind_path],
+                    volumes={self.sandbox_base_dir: {'bind': self.sandbox_bind_path, 'mode': 'ro'}},
                     network_mode="none",
-                    remove=True, # 无论测试成功还是失败，测试完自动销毁容器
+                    remove=True,
                     stdout=True,
                     stderr=True,
                     detach=False

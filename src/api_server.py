@@ -29,51 +29,71 @@ class MutateRequest(BaseModel):
     new_content: str
 
 # --- 1. 控制面：大模型代码进化网关接口 ---
-@app.post("/api/v1/evolution/mutate")
-async def mutate_code_base(payload: MutateRequest, background_tasks: BackgroundTasks):
+@app.post("/api/v1/evolution/mutate", summary="触发代码自进化流水线")
+async def mutate_code_base(
+    payload: MutateRequest,
+    background_tasks: BackgroundTasks,
+) -> Dict[str, Any]:
+    """
+    接收 OpenClaw / LLM 下发的代码突变指令，执行完整的自进化流水线：
+      抢锁 → 影子沙箱回归测试 → 覆写生产代码 → Git 自动推送 → 容器热重启
+ 
+    锁管理完全由 CodeEvolutionManager.execute_evolution_flow() 负责，
+    本接口不手动调用 acquire_lock() / release_lock()，彻底消除 double-lock 死锁。
+    """
+ 
+    # ── Step 1: 基础参数校验 ──────────────────────────────────
     if not payload.target_file or not payload.new_content:
-        raise HTTPException(status_code=400, detail="突变参数缺失")
-
-    # 🔒 目录遍历安全防御：统一防线切归到 /workspace
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="突变参数缺失：target_file 与 new_content 均为必填项。",
+        )
+ 
+    # ── Step 2: 路径安全防御（目录遍历拦截）──────────────────
     safe_path = os.path.normpath(os.path.join("/workspace", payload.target_file))
-    if not safe_path.startswith("/workspace"):
+    if not safe_path.startswith("/workspace/"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="安全防御拦截：禁止大模型修改容器外部的任何敏感文件！"
+            detail="安全防御拦截：禁止大模型修改 /workspace 之外的任何文件！",
         )
-
-    # 试图抢占排他锁（独占编译测试流）
-    if not code_manager.acquire_lock():
-        raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail="当前系统有另一个自我进化流水线正在独占执行，请稍后再试"
-        )
-
-    try:
-        # 执行你在 code_manager 中写好的核心业务流：
-        # 复制影子代码 -> 拉起隔离容器跑 pytest -> 覆写真实工作区 -> 本地 Git 自动 Commit
-        result = code_manager.execute_evolution_flow(payload.target_file, payload.new_content)
-        
-        if not result.get("success"):
-            code_manager.release_lock()
+ 
+    # ── Step 3: 调用进化流水线（锁由内部统一管理）────────────
+    logger.info(f"[突变请求] 目标文件: {payload.target_file}，安全路径校验通过，移交进化流水线。")
+ 
+    result: Dict[str, Any] = code_manager.execute_evolution_flow(
+        target_rel_path=payload.target_file,
+        new_content=payload.new_content,
+    )
+ 
+    # ── Step 4: 根据流水线返回值映射 HTTP 响应 ────────────────
+    if not result.get("success"):
+        message = result.get("message", "未知错误")
+ 
+        # 区分"锁冲突"与"流程失败"，返回语义准确的状态码
+        if "已上锁" in message or "正在修改维护代码" in message:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"影子沙箱测试未通过！变更已安全拦截。Pytest 报错原因:\n{result.get('error')}"
+                status_code=status.HTTP_423_LOCKED,
+                detail=message,
             )
-
-        # 🚀 代码完美通过测试：将其加入后台异步任务，安全地延迟自愈重启容器
-        background_tasks.add_task(code_manager.trigger_production_restart)
-        
-        return {
-            "success": True,
-            "message": f"文件 {payload.target_file} 顺利通过影子回归测试，变更已并入主干，服务正在重启自愈中。"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        code_manager.release_lock()
-        raise HTTPException(status_code=500, detail=f"突变网关内部遭遇致命异常: {str(e)}")
+ 
+        # 沙箱测试未通过或其他流程失败
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        )
+ 
+    # ── Step 5: 流水线成功 ────────────────────────────────────
+    # execute_evolution_flow 内部已通过 threading.Timer 调度了容器重启，
+    # 此处不再重复添加 background_tasks，避免双重重启。
+    logger.info(f"[突变成功] {payload.target_file} 进化完毕，服务重启已调度。")
+ 
+    return {
+        "success": True,
+        "message": result.get(
+            "message",
+            f"文件 {payload.target_file} 顺利通过影子回归测试，变更已并入主干，服务正在重启自愈中。",
+        ),
+    }
 
 # --- 2. 业务面：常驻核心业务接口群 ---
 @app.get("/health")

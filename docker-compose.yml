@@ -6,8 +6,10 @@ services:
     restart: always
     ports:
       - "${OPENCLAW_PORT}:8000"
+    environment:
+      - OPENCLAW_CONFIG=/root/.openclaw/openclaw.json
     volumes:
-      - ${HOST_PROJECT_PATH}/openclaw.json:/root/.openclaw/openclaw.json
+      - ${HOST_PROJECT_PATH}/openclaw.json:/root/.openclaw/openclaw.json:ro
       - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
       - ${HOST_PROJECT_PATH:-.}/opencode-executor:/app/plugins/opencode-executor
     env_file:
@@ -21,8 +23,8 @@ services:
     image: personal_brain_runtime_base:latest
     container_name: ${PRODUCTION_CONTAINER_NAME}
     restart: always
-    ports:
-      - "${PERSONAL_BRAIN_PORT}:3000"
+    # ports:
+    #   - "${PERSONAL_BRAIN_PORT}:8000"
     working_dir: /workspace
     volumes:
       - ${HOST_PROJECT_PATH:-.}:/workspace
@@ -33,4 +35,8 @@ services:
     env_file:
       - .env
     command: >
-      sh -c "uv sync && python -m src.main"
+      sh -c "
+      cd /workspace &&
+      uv sync --frozen 2>/dev/null || uv sync &&
+      python -m src.main
+    "

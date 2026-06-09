@@ -7,6 +7,7 @@
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from event_bus import NewEventBus
 from src.db_model.base_model import get_db_session, Task
 
 
@@ -16,8 +17,8 @@ class TaskDAO:
     仅做数据库读写操作，不处理业务逻辑
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, event_bus: NewEventBus):
+        self.event_bus = event_bus
 
     def create(self, task_data: Dict[str, Any]) -> tuple:
         """
