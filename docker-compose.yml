@@ -1,62 +1,36 @@
 services:
-  # 1. 业务运行时（FastAPI 生产容器：无 ports 映射，仅在内网暴露）
-  brain_app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: brain_app_runtime
-    env_file:
-      - .env
-    volumes:
-      - ./src:/workspace/src
-      - .env:/workspace/src/.env
-      - ./.venv:/workspace/src/.venv
-    working_dir: /workspace/src
-    expose:
-      - "${BRAIN_APP_PORT}"
-    # 生产级常驻进程，支持接收 SIGHUP 信号优雅热重载
-    command: ["/workspace/src/.venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-    networks:
-      - brain_net
-    restart: always
-
-  # 2. OpenCode 自动化编译与构建智能体
-  opencode:
-    image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/opencode:latest
-    container_name: brain_opencode
-    env_file:
-      - .env
-    volumes:
-      - .:/workspace
-      - ./opencode_config.json:/root/.config/opencode/config.json
-    working_dir: /workspace/src
-    tty: true
-    stdin_open: true
-    command: >
-      bash -c "git config --global user.name 'BrainAgent' &&
-      git config --global user.email 'agent@brain.local' &&
-      tail -f /dev/null"
-    networks:
-      - brain_net
-
-  # 3. OpenClaw 核心网关（唯一向外交付的 WebUI 入口）
-  openclaw:
+  # 1. 控制面：OpenClaw 统一网关
+  openclaw-gateway:
     image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
-    container_name: brain_openclaw
+    container_name: openclaw_gateway
+    restart: always
     ports:
-      - "${OPENCLAW_UI_PORT}:${OPENCLAW_UI_PORT}"
+      - "${OPENCLAW_PORT}:8000"
+    volumes:
+      - ${HOST_PROJECT_PATH}/openclaw.json:/root/.openclaw/openclaw.json
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${HOST_PROJECT_PATH:-.}/opencode-executor:/app/plugins/opencode-executor
     env_file:
       - .env
-    environment:
-      - OPENCLAW_CONFIG_PATH=/app/config/openclaw.json
-    volumes:
-      - .:/workspace
-      - ./openclaw.json:/app/config/openclaw.json
-      - ./AGENTS.md:/app/config/AGENTS.md:ro
-    working_dir: /workspace/src
-    networks:
-      - brain_net
 
-networks:
-  brain_net:
-    driver: bridge
+  # 2. 运行面与控制面合一：personal_brain 核心业务容器
+  personal-brain-runtime:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    image: personal_brain_runtime_base:latest
+    container_name: ${PRODUCTION_CONTAINER_NAME}
+    restart: always
+    ports:
+      - "${PERSONAL_BRAIN_PORT}:3000"
+    working_dir: /workspace
+    volumes:
+      - ${HOST_PROJECT_PATH:-.}:/workspace
+      - ${HOST_PROJECT_PATH:-.}/data:/workspace/data
+    environment:
+      - PYTHONPATH=/workspace
+      - TZ=Asia/Shanghai
+    env_file:
+      - .env
+    command: >
+      sh -c "uv sync && python -m src.main"

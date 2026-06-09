@@ -1,0 +1,24 @@
+{
+  "id": "openclaw-plugin-opencode-executor",
+  "name": "opencode-executor",
+  "version": "3.0.0",
+  "entryPoint": "dist/index.js",
+  "type": "tool",
+  "capabilities": ["stream:output"],
+  "openclaw": {
+    "tools": [
+      {
+        "name": "evolve_personal_brain",
+        "description": "当用户需要改进、修复或扩展 personal_brain 核心代码时唤醒。该工具会将全新代码投递给项目的进化网关进行沙箱验证。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target_file": { "type": "string", "description": "目标修改文件相对路径，例如 src/service/task_service.py" },
+            "new_content": { "type": "string", "description": "LLM 思考后生成的、完整的、全量的全新文件代码内容" }
+          },
+          "required": ["target_file", "new_content"]
+        }
+      }
+    ]
+  }
+}

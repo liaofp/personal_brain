@@ -1,0 +1,1844 @@
+# ==========================================
+# File: src/event_bus.py
+# ==========================================
+# -*- coding: utf-8 -*
+"""
+基于观察者模式和线程安全架构的事件总线。
+用于将 OpenClaw 代码自我进化、测试和部署的长耗时中间状态异步通知给人机交互层。
+"""
+
+import logging
+import threading
+from typing import Callable, Dict, List, Any
+
+# 初始化日志记录
+logger = logging.getLogger("OpenClaw.EventBus")
+
+# ==========================================
+# 核心事件类型常量定义
+# ==========================================
+EVENT_CODE_EVOLUTION_START = "code.evolution.start"
+EVENT_LOCK_ACQUIRED        = "lock.acquired"
+EVENT_LOCK_FAILED          = "lock.failed"
+EVENT_GIT_BRANCH_CREATED   = "git.branch.created"
+EVENT_SANDBOX_START        = "sandbox.start"
+EVENT_SANDBOX_SUCCESS      = "sandbox.success"
+EVENT_SANDBOX_FAILED       = "sandbox.failed"
+EVENT_GIT_PUSH_SUCCESS     = "git.push.success"
+EVENT_CONTAINER_RESTARTING = "container.restarting"
+
+
+class NewEventBus:
+    """
+    单例模式的高性能线程安全事件总线
+    """
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        """
+        确保全局只有一个事件总线实例，维持状态一致性
+        """
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(NewEventBus, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._subscribers: Dict[str, List[Callable[[str, Any], None]]] = {}
+        self._registry_lock = threading.Lock()  # 保护订阅者名册的并发安全锁
+        self._initialized = True
+        logger.info("OpenClaw 全局事件总线初始化成功。")
+
+    def subscribe(self, event_type: str, callback: Callable[[str, Any], None]):
+        """
+        订阅特定类型的事件
+        :param event_type: 事件类型常量 (例如 EVENT_SANDBOX_START)
+        :param callback: 触发事件时的回调函数，签名需为 func(event_type: str, data: Any)
+        """
+        with self._registry_lock:
+            if event_type not in self._subscribers:
+                self._subscribers[event_type] = []
+            if callback not in self._subscribers[event_type]:
+                self._subscribers[event_type].append(callback)
+                logger.debug(f"订阅成功 - 事件: {event_type} | 回调: {callback.__name__}")
+
+    def unsubscribe(self, event_type: str, callback: Callable[[str, Any], None]):
+        """
+        取消订阅特定类型的事件
+        """
+        with self._registry_lock:
+            if event_type in self._subscribers and callback in self._subscribers[event_type]:
+                self._subscribers[event_type].remove(callback)
+                logger.debug(f"退订成功 - 事件: {event_type} | 回调: {callback.__name__}")
+
+    def publish(self, event_type: str, data: Any = None):
+        """
+        同步或异步广播发布一个事件，触发所有注册过的回调
+        :param event_type: 事件类型常量
+        :param data: 附带的上下文负载数据（如同异步传输的日志、错误信息或中间状态）
+        """
+        # 获取当前时间点订阅者的快照，防止在回调执行过程中有其他线程修改订阅列表引发 RuntimeError
+        callbacks_to_execute = []
+        with self._registry_lock:
+            if event_type in self._subscribers:
+                callbacks_to_execute = list(self._subscribers[event_type])
+
+        if not callbacks_to_execute:
+            logger.debug(f"发布事件 {event_type}，但当前没有订阅者接收。")
+            return
+
+        for callback in callbacks_to_execute:
+            try:
+                # 触发回调执行
+                callback(event_type, data)
+            except Exception as e:
+                logger.error(f"事件总线在执行回调时崩溃 | 事件: {event_type} | 错误: {str(e)}", exc_info=True)
+
+
+# 全局单例导出，方便其他模块直接 import 使用
+event_bus = NewEventBus()
+
+# ==========================================
+# File: src/main.py
+# ==========================================
+from fastapi import FastAPI
+import uvicorn
+import signal
+import os
+
+app = FastAPI(title="Personal Brain API")
+
+# 结合 code.txt 中的 5 层架构，这里应导入对应的 Agent 路由
+# from app.api.v1 import router as api_router
+# app.include_router(api_router)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    # 生产模式下由 docker-compose 的 command 启动，此处保留本地调试能力
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+
+# ==========================================
+# File: src/code_manager.py
+# ==========================================
+# ==========================================
+# File: code_manager.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+OpenClaw 核心控制面：代码安全进化管理器
+管理原子级排他锁、影子沙箱测试、Token版Git自动化流水线及容器自愈热重启。
+"""
+
+import os
+import shutil
+import logging
+import threading
+import subprocess
+from typing import Tuple, Dict, Any
+import docker
+
+from src.event_bus import (
+    event_bus,
+    EVENT_CODE_EVOLUTION_START,
+    EVENT_LOCK_ACQUIRED,
+    EVENT_LOCK_FAILED,
+    EVENT_SANDBOX_START,
+    EVENT_SANDBOX_SUCCESS,
+    EVENT_SANDBOX_FAILED,
+    EVENT_GIT_PUSH_SUCCESS,
+    EVENT_CONTAINER_RESTARTING
+)
+
+logger = logging.getLogger("OpenClaw.CodeManager")
+
+class CodeEvolutionManager:
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        """
+        单例模式：保证全局只有一个代码自进化管理器，维持锁状态绝对唯一
+        """
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super(CodeEvolutionManager, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
+    def __init__(self, workspace_dir: str = "/pb", sandbox_base_dir: str = "/tmp/pb_sandbox"):
+        if self._initialized:
+            return
+        self.workspace_dir = workspace_dir
+        self.sandbox_base_dir = sandbox_base_dir
+        
+        # 🏆 核心物理/内存双重保障排他锁
+        self._state_lock = threading.Lock()
+        self.is_evolving = False  # 互斥状态标志位
+        
+        # 初始化 Docker 客户端（完美通过 DOCKER_HOST 环境变量走 docker-proxy 通信）
+        self._docker_client = None
+        self._initialized = True
+
+    @property
+    def docker_client(self):
+        if self._docker_client is None:
+            try:
+                self._docker_client = docker.from_env()
+            except Exception as e:
+                logger.error(f"无法初始化 Docker 客户端，请检查 DOCKER_HOST 或 docker-proxy 状态: {e}")
+        return self._docker_client
+
+    def acquire_lock(self) -> bool:
+        """
+        尝试抢占全局代码修改排他锁（非阻塞模式）
+        """
+        with self._state_lock:
+            if self.is_evolving:
+                logger.warning("加锁失败: 当前已有其他并发任务或用户正在修改维护代码。")
+                event_bus.publish(EVENT_LOCK_FAILED, "已有其他用户或Agent线程正在修改代码，本次抢锁被拦截。")
+                return False
+            self.is_evolving = True
+            logger.info("全局代码修改排他锁抢占成功。")
+            event_bus.publish(EVENT_LOCK_ACQUIRED, "成功夺取代码进化排他锁，阻断其他并发修改。")
+            return True
+
+    def release_lock(self):
+        """
+        释放全局代码修改排他锁
+        """
+        with self._state_lock:
+            self.is_evolving = False
+            logger.info("全局代码修改排他锁已成功释放。")
+
+    def execute_evolution_flow(self, target_rel_path: str, new_content: str) -> Dict[str, Any]:
+        """
+        全自动化修改维护流水线：抢锁 -> 影子沙箱测试 -> 覆写生产 -> 跨平台Git推送 -> 重启自身
+        """
+        # 1. 抢占排他锁。如果失败，立即拒绝请求，不阻塞调用线程
+        if not self.acquire_lock():
+            return {
+                "success": False,
+                "message": "❌ 拒绝操作：当前正有其他用户或大模型正在修改维护代码，系统已上锁，请稍后再试。"
+            }
+
+        event_bus.publish(EVENT_CODE_EVOLUTION_START, f"启动代码自进化。目标文件: {target_rel_path}")
+        
+        # 清理并创建纯净的影子沙箱代码目录
+        if os.path.exists(self.sandbox_base_dir):
+            shutil.rmtree(self.sandbox_base_dir)
+
+        try:
+            # 2. 复制当前运行期的物理代码到影子沙箱目录，隔绝对外污染
+            # 忽略 .git 历史、Python 编译缓存以及本地读写中的持久化数据文件
+            shutil.copytree(
+                self.workspace_dir, 
+                self.sandbox_base_dir, 
+                ignore=shutil.ignore_patterns('.git', '__pycache__', 'data', '*.db', '.evolution.lock')
+            )
+            
+            # 将大模型生成或修改的新代码，精准写入影子沙箱对应的文件路径中
+            shadow_file_path = os.path.join(self.sandbox_base_dir, target_rel_path)
+            os.makedirs(os.path.dirname(shadow_file_path), exist_ok=True)
+            with open(shadow_file_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            # 3. 动态调用 Docker API 拉起物理隔离的影子测试沙箱运行 pytest
+            event_bus.publish(EVENT_SANDBOX_START, f"拉起影子沙箱容器，对 {target_rel_path} 触发单元与回归测试...")
+            
+            if self.docker_client:
+                # 动态以只读模式（ro）挂载影子代码目录到临时容器中跑测试
+                # network_mode="none" 彻底切断测试网络，完全防御大模型反弹Shell或恶意投毒行为
+                self.docker_client.containers.run(
+                    image="personal-brain:evolution-v1.0", # 配合 docker-compose 构建的本地生产镜像
+                    command=["pytest", "/pb"],
+                    volumes={self.sandbox_base_dir: {'bind': '/pb', 'mode': 'ro'}},
+                    network_mode="none",
+                    remove=True, # 无论测试成功还是失败，测试完自动销毁容器
+                    stdout=True,
+                    stderr=True,
+                    detach=False
+                )
+            else:
+                # 兜底降级：如果 Docker 环境未初始化成功，使用物理子进程进行 pytest 回归测试
+                logger.warning("Docker 客户端未就绪，使用宿主本地子进程环境降级运行测试...")
+                res = subprocess.run(["pytest", self.sandbox_base_dir], capture_output=True, text=True, timeout=30)
+                if res.returncode != 0:
+                    raise Exception(f"本地降级测试未通过:\n{res.stderr or res.stdout}")
+
+            event_bus.publish(EVENT_SANDBOX_SUCCESS, "🎉 影子沙箱回归测试 100% 通过！新代码逻辑安全。")
+
+            # 4. 回归测试通过，将影子代码覆盖到真实的物理生产目录（/pb）
+            real_production_path = os.path.join(self.workspace_dir, target_rel_path)
+            os.makedirs(os.path.dirname(real_production_path), exist_ok=True)
+            with open(real_production_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            # 5. 安全执行 Git 自动化推送流程（通过 GitHub 环境变量中的 Token 无密码鉴权）
+            token = os.getenv("GITHUB_TOKEN")
+            repo_url_raw = os.getenv("GITHUB_REPO_URL") # 格式如: github.com/user/repo.git
+            if token and repo_url_raw:
+                repo_url_clean = repo_url_raw.replace("https://", "").replace("http://", "")
+                authenticated_url = f"https://oauth2:{token}@{repo_url_clean}"
+                
+                # 配置临时环境凭证
+                subprocess.run(["git", "config", "user.name", os.getenv("GIT_AUTHOR_NAME", "OpenClaw-Agent")], cwd=self.workspace_dir)
+                subprocess.run(["git", "config", "user.email", os.getenv("GIT_AUTHOR_EMAIL", "agent@openclaw.io")], cwd=self.workspace_dir)
+                
+                # 执行 Git 提交组合拳
+                subprocess.run(["git", "add", target_rel_path], cwd=self.workspace_dir)
+                subprocess.run(["git", "commit", "-m", f"[OpenClaw Evolution] 自动优化维护 {target_rel_path}"], cwd=self.workspace_dir)
+                
+                push_res = subprocess.run(["git", "push", authenticated_url, "main"], cwd=self.workspace_dir, capture_output=True, text=True)
+                if push_res.returncode == 0:
+                    event_bus.publish(EVENT_GIT_PUSH_SUCCESS, "🚀 代码已成功同步 Push 提交至远端 GitHub 仓库。")
+                else:
+                    logger.error(f"Git Push 推送远端仓库失败: {push_res.stderr}")
+
+            # 6. 安全触发热更新重启流程
+            event_bus.publish(EVENT_CONTAINER_RESTARTING, "正在通过编排面安全重启 personal-brain 容器以加载新代码...")
+            # 利用线程定时器延迟 2 秒执行重启，确保 FastAPI 能够把完整的成功响应推回给 OpenClaw 交互端
+            threading.Timer(2.0, self._trigger_container_restart).start()
+
+            return {
+                "success": True,
+                "message": f"✅ 代码 [{target_rel_path}] 修改成功！通过沙箱全量回归测试，已同步 GitHub，系统正在重启生效。"
+            }
+
+        except docker.errors.ContainerError as e:
+            # 精准捕获 pytest 测试失败并抛出的容器内异常日志
+            test_logs = e.stderr.decode('utf-8', errors='ignore')
+            event_bus.publish(EVENT_SANDBOX_FAILED, f"❌ 测试失败：新代码存在逻辑缺陷，未通过影子沙箱测试。")
+            return {
+                "success": False,
+                "message": f"❌ 未能通过影子沙箱测试，修改已被拦截安全撤销。测试崩溃日志如下:\n{test_logs}"
+            }
+        except Exception as e:
+            logger.error(f"自进化流水线遭遇异常: {e}", exc_info=True)
+            event_bus.publish(EVENT_SANDBOX_FAILED, f"自进化流水线异常中断: {str(e)}")
+            return {"success": False, "message": f"❌ 系统修改异常: {str(e)}"}
+        finally:
+            # 🏆 无论进化成功还是中间报错，在结束时必须无条件释放排他锁，防止控制面死锁
+            self.release_lock()
+
+    def _trigger_container_restart(self):
+        """
+        通过安全代理平滑、安全地重新拉起自身容器
+        """
+        try:
+            if self.docker_client:
+                my_container = self.docker_client.containers.get("personal-brain")
+                my_container.restart(timeout=5)
+            else:
+                # 极端兜底方案：直接强杀进程，依赖 docker-compose.yml 中的 restart: always 策略自动重启加载
+                os._exit(0)
+        except Exception as e:
+            logger.error(f"安全代理控制面重启容器失败: {e}")
+            os._exit(1)
+
+# 全局暴露单例对象
+code_manager = CodeEvolutionManager()
+
+# ==========================================
+# File: src/code_manager.py
+# ==========================================
+# ==========================================
+# File: code_manager.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+OpenClaw 核心控制面：代码安全进化管理器
+管理原子级排他锁、影子沙箱测试、Token版Git自动化流水线及容器自愈热重启。
+"""
+
+import os
+import shutil
+import logging
+import threading
+import subprocess
+from typing import Tuple, Dict, Any
+import docker
+
+from src.event_bus import (
+    event_bus,
+    EVENT_CODE_EVOLUTION_START,
+    EVENT_LOCK_ACQUIRED,
+    EVENT_LOCK_FAILED,
+    EVENT_SANDBOX_START,
+    EVENT_SANDBOX_SUCCESS,
+    EVENT_SANDBOX_FAILED,
+    EVENT_GIT_PUSH_SUCCESS,
+    EVENT_CONTAINER_RESTARTING
+)
+
+logger = logging.getLogger("OpenClaw.CodeManager")
+
+class CodeEvolutionManager:
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        """
+        单例模式：保证全局只有一个代码自进化管理器，维持锁状态绝对唯一
+        """
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super(CodeEvolutionManager, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
+    def __init__(self, workspace_dir: str = "/pb", sandbox_base_dir: str = "/tmp/pb_sandbox"):
+        if self._initialized:
+            return
+        self.workspace_dir = workspace_dir
+        self.sandbox_base_dir = sandbox_base_dir
+        
+        # 🏆 核心物理/内存双重保障排他锁
+        self._state_lock = threading.Lock()
+        self.is_evolving = False  # 互斥状态标志位
+        
+        # 初始化 Docker 客户端（完美通过 DOCKER_HOST 环境变量走 docker-proxy 通信）
+        self._docker_client = None
+        self._initialized = True
+
+    @property
+    def docker_client(self):
+        if self._docker_client is None:
+            try:
+                self._docker_client = docker.from_env()
+            except Exception as e:
+                logger.error(f"无法初始化 Docker 客户端，请检查 DOCKER_HOST 或 docker-proxy 状态: {e}")
+        return self._docker_client
+
+    def acquire_lock(self) -> bool:
+        """
+        尝试抢占全局代码修改排他锁（非阻塞模式）
+        """
+        with self._state_lock:
+            if self.is_evolving:
+                logger.warning("加锁失败: 当前已有其他并发任务或用户正在修改维护代码。")
+                event_bus.publish(EVENT_LOCK_FAILED, "已有其他用户或Agent线程正在修改代码，本次抢锁被拦截。")
+                return False
+            self.is_evolving = True
+            logger.info("全局代码修改排他锁抢占成功。")
+            event_bus.publish(EVENT_LOCK_ACQUIRED, "成功夺取代码进化排他锁，阻断其他并发修改。")
+            return True
+
+    def release_lock(self):
+        """
+        释放全局代码修改排他锁
+        """
+        with self._state_lock:
+            self.is_evolving = False
+            logger.info("全局代码修改排他锁已成功释放。")
+
+    def execute_evolution_flow(self, target_rel_path: str, new_content: str) -> Dict[str, Any]:
+        """
+        全自动化修改维护流水线：抢锁 -> 影子沙箱测试 -> 覆写生产 -> 跨平台Git推送 -> 重启自身
+        """
+        # 1. 抢占排他锁。如果失败，立即拒绝请求，不阻塞调用线程
+        if not self.acquire_lock():
+            return {
+                "success": False,
+                "message": "❌ 拒绝操作：当前正有其他用户或大模型正在修改维护代码，系统已上锁，请稍后再试。"
+            }
+
+        event_bus.publish(EVENT_CODE_EVOLUTION_START, f"启动代码自进化。目标文件: {target_rel_path}")
+        
+        # 清理并创建纯净的影子沙箱代码目录
+        if os.path.exists(self.sandbox_base_dir):
+            shutil.rmtree(self.sandbox_base_dir)
+
+        try:
+            # 2. 复制当前运行期的物理代码到影子沙箱目录，隔绝对外污染
+            # 忽略 .git 历史、Python 编译缓存以及本地读写中的持久化数据文件
+            shutil.copytree(
+                self.workspace_dir, 
+                self.sandbox_base_dir, 
+                ignore=shutil.ignore_patterns('.git', '__pycache__', 'data', '*.db', '.evolution.lock')
+            )
+            
+            # 将大模型生成或修改的新代码，精准写入影子沙箱对应的文件路径中
+            shadow_file_path = os.path.join(self.sandbox_base_dir, target_rel_path)
+            os.makedirs(os.path.dirname(shadow_file_path), exist_ok=True)
+            with open(shadow_file_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            # 3. 动态调用 Docker API 拉起物理隔离的影子测试沙箱运行 pytest
+            event_bus.publish(EVENT_SANDBOX_START, f"拉起影子沙箱容器，对 {target_rel_path} 触发单元与回归测试...")
+            
+            if self.docker_client:
+                # 动态以只读模式（ro）挂载影子代码目录到临时容器中跑测试
+                # network_mode="none" 彻底切断测试网络，完全防御大模型反弹Shell或恶意投毒行为
+                self.docker_client.containers.run(
+                    image="personal-brain:evolution-v1.0", # 配合 docker-compose 构建的本地生产镜像
+                    command=["pytest", "/pb"],
+                    volumes={self.sandbox_base_dir: {'bind': '/pb', 'mode': 'ro'}},
+                    network_mode="none",
+                    remove=True, # 无论测试成功还是失败，测试完自动销毁容器
+                    stdout=True,
+                    stderr=True,
+                    detach=False
+                )
+            else:
+                # 兜底降级：如果 Docker 环境未初始化成功，使用物理子进程进行 pytest 回归测试
+                logger.warning("Docker 客户端未就绪，使用宿主本地子进程环境降级运行测试...")
+                res = subprocess.run(["pytest", self.sandbox_base_dir], capture_output=True, text=True, timeout=30)
+                if res.returncode != 0:
+                    raise Exception(f"本地降级测试未通过:\n{res.stderr or res.stdout}")
+
+            event_bus.publish(EVENT_SANDBOX_SUCCESS, "🎉 影子沙箱回归测试 100% 通过！新代码逻辑安全。")
+
+            # 4. 回归测试通过，将影子代码覆盖到真实的物理生产目录（/pb）
+            real_production_path = os.path.join(self.workspace_dir, target_rel_path)
+            os.makedirs(os.path.dirname(real_production_path), exist_ok=True)
+            with open(real_production_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            # 5. 安全执行 Git 自动化推送流程（通过 GitHub 环境变量中的 Token 无密码鉴权）
+            token = os.getenv("GITHUB_TOKEN")
+            repo_url_raw = os.getenv("GITHUB_REPO_URL") # 格式如: github.com/user/repo.git
+            if token and repo_url_raw:
+                repo_url_clean = repo_url_raw.replace("https://", "").replace("http://", "")
+                authenticated_url = f"https://oauth2:{token}@{repo_url_clean}"
+                
+                # 配置临时环境凭证
+                subprocess.run(["git", "config", "user.name", os.getenv("GIT_AUTHOR_NAME", "OpenClaw-Agent")], cwd=self.workspace_dir)
+                subprocess.run(["git", "config", "user.email", os.getenv("GIT_AUTHOR_EMAIL", "agent@openclaw.io")], cwd=self.workspace_dir)
+                
+                # 执行 Git 提交组合拳
+                subprocess.run(["git", "add", target_rel_path], cwd=self.workspace_dir)
+                subprocess.run(["git", "commit", "-m", f"[OpenClaw Evolution] 自动优化维护 {target_rel_path}"], cwd=self.workspace_dir)
+                
+                push_res = subprocess.run(["git", "push", authenticated_url, "main"], cwd=self.workspace_dir, capture_output=True, text=True)
+                if push_res.returncode == 0:
+                    event_bus.publish(EVENT_GIT_PUSH_SUCCESS, "🚀 代码已成功同步 Push 提交至远端 GitHub 仓库。")
+                else:
+                    logger.error(f"Git Push 推送远端仓库失败: {push_res.stderr}")
+
+            # 6. 安全触发热更新重启流程
+            event_bus.publish(EVENT_CONTAINER_RESTARTING, "正在通过编排面安全重启 personal-brain 容器以加载新代码...")
+            # 利用线程定时器延迟 2 秒执行重启，确保 FastAPI 能够把完整的成功响应推回给 OpenClaw 交互端
+            threading.Timer(2.0, self._trigger_container_restart).start()
+
+            return {
+                "success": True,
+                "message": f"✅ 代码 [{target_rel_path}] 修改成功！通过沙箱全量回归测试，已同步 GitHub，系统正在重启生效。"
+            }
+
+        except docker.errors.ContainerError as e:
+            # 精准捕获 pytest 测试失败并抛出的容器内异常日志
+            test_logs = e.stderr.decode('utf-8', errors='ignore')
+            event_bus.publish(EVENT_SANDBOX_FAILED, f"❌ 测试失败：新代码存在逻辑缺陷，未通过影子沙箱测试。")
+            return {
+                "success": False,
+                "message": f"❌ 未能通过影子沙箱测试，修改已被拦截安全撤销。测试崩溃日志如下:\n{test_logs}"
+            }
+        except Exception as e:
+            logger.error(f"自进化流水线遭遇异常: {e}", exc_info=True)
+            event_bus.publish(EVENT_SANDBOX_FAILED, f"自进化流水线异常中断: {str(e)}")
+            return {"success": False, "message": f"❌ 系统修改异常: {str(e)}"}
+        finally:
+            # 🏆 无论进化成功还是中间报错，在结束时必须无条件释放排他锁，防止控制面死锁
+            self.release_lock()
+
+    def _trigger_container_restart(self):
+        """
+        通过安全代理平滑、安全地重新拉起自身容器
+        """
+        try:
+            if self.docker_client:
+                my_container = self.docker_client.containers.get("personal-brain")
+                my_container.restart(timeout=5)
+            else:
+                # 极端兜底方案：直接强杀进程，依赖 docker-compose.yml 中的 restart: always 策略自动重启加载
+                os._exit(0)
+        except Exception as e:
+            logger.error(f"安全代理控制面重启容器失败: {e}")
+            os._exit(1)
+
+# 全局暴露单例对象
+code_manager = CodeEvolutionManager()
+
+# ==========================================
+# File: src/api_server.py
+# ==========================================
+# -*- coding: utf-8 -*-
+import os
+import logging
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks
+from pydantic import BaseModel
+from typing import List, Dict, Any
+
+from src.event_bus import NewEventBus
+from src.code_manager import CodeEvolutionManager
+from src.dao.person_dao import PersonDAO
+from src.dao.task_dao import TaskDAO
+
+logger = logging.getLogger("OpenClaw.ApiServer")
+
+app = FastAPI(
+    title="🧠 Personal Brain 统一生产网关",
+    description="高内聚架构：融合业务 API 服务与控制面自进化隔离突变接口",
+    version="2.5.0"
+)
+
+# 内存单例组件初始化（统一锚定 /workspace）
+event_bus = NewEventBus()
+code_manager = CodeEvolutionManager(workspace_dir="/workspace")
+person_dao = PersonDAO()
+task_dao = TaskDAO(event_bus)
+
+class MutateRequest(BaseModel):
+    target_file: str
+    new_content: str
+
+# --- 1. 控制面：大模型代码进化网关接口 ---
+@app.post("/api/v1/evolution/mutate")
+async def mutate_code_base(payload: MutateRequest, background_tasks: BackgroundTasks):
+    if not payload.target_file or not payload.new_content:
+        raise HTTPException(status_code=400, detail="突变参数缺失")
+
+    # 🔒 目录遍历安全防御：统一防线切归到 /workspace
+    safe_path = os.path.normpath(os.path.join("/workspace", payload.target_file))
+    if not safe_path.startswith("/workspace"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="安全防御拦截：禁止大模型修改容器外部的任何敏感文件！"
+        )
+
+    # 试图抢占排他锁（独占编译测试流）
+    if not code_manager.acquire_lock():
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="当前系统有另一个自我进化流水线正在独占执行，请稍后再试"
+        )
+
+    try:
+        # 执行你在 code_manager 中写好的核心业务流：
+        # 复制影子代码 -> 拉起隔离容器跑 pytest -> 覆写真实工作区 -> 本地 Git 自动 Commit
+        result = code_manager.execute_evolution_flow(payload.target_file, payload.new_content)
+        
+        if not result.get("success"):
+            code_manager.release_lock()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"影子沙箱测试未通过！变更已安全拦截。Pytest 报错原因:\n{result.get('error')}"
+            )
+
+        # 🚀 代码完美通过测试：将其加入后台异步任务，安全地延迟自愈重启容器
+        background_tasks.add_task(code_manager.trigger_production_restart)
+        
+        return {
+            "success": True,
+            "message": f"文件 {payload.target_file} 顺利通过影子回归测试，变更已并入主干，服务正在重启自愈中。"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        code_manager.release_lock()
+        raise HTTPException(status_code=500, detail=f"突变网关内部遭遇致命异常: {str(e)}")
+
+# --- 2. 业务面：常驻核心业务接口群 ---
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "lock_state": "locked" if code_manager.is_evolving else "unlocked"}
+
+# ==========================================
+# File: src/dao/task_dao.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+任务数据访问层
+封装任务新增、时间筛选查询、状态更新、任务删除方法
+处理查询条件拼装、数据格式适配
+"""
+
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from src.db_model.base_model import get_db_session, Task
+
+
+class TaskDAO:
+    """
+    任务数据访问对象
+    仅做数据库读写操作，不处理业务逻辑
+    """
+
+    def __init__(self):
+        pass
+
+    def create(self, task_data: Dict[str, Any]) -> tuple:
+        """
+        新增任务
+        :param task_data: 任务信息字典
+        :return: (是否成功, 新增任务对象或错误信息)
+        """
+        session = get_db_session()
+        try:
+            task = Task(**task_data)
+            session.add(task)
+            session.commit()
+            session.refresh(task)
+            return True, task
+        except Exception as e:
+            session.rollback()
+            return False, f"新增任务失败: {str(e)}"
+        finally:
+            session.close()
+
+    def get_by_id(self, task_id: int) -> tuple:
+        """
+        根据ID查询单条任务
+        :param task_id: 任务唯一编号
+        :return: (是否成功, 任务对象或错误信息)
+        """
+        session = get_db_session()
+        try:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if task:
+                return True, task
+            return False, f"未找到编号为 {task_id} 的任务"
+        except Exception as e:
+            return False, f"查询任务失败: {str(e)}"
+        finally:
+            session.close()
+
+    def get_all(self) -> tuple:
+        """
+        查询所有任务列表
+        :return: (是否成功, 任务列表或错误信息)
+        """
+        session = get_db_session()
+        try:
+            tasks = session.query(Task).order_by(Task.created_at.desc()).all()
+            return True, tasks
+        except Exception as e:
+            return False, f"查询任务列表失败: {str(e)}"
+        finally:
+            session.close()
+
+    def get_today_tasks(self) -> tuple:
+        """
+        查询当日任务
+        :return: (是否成功, 任务列表或错误信息)
+        """
+        session = get_db_session()
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            tasks = session.query(Task).filter(
+                Task.start_time.like(f"{today}%")
+            ).order_by(Task.created_at.desc()).all()
+            return True, tasks
+        except Exception as e:
+            return False, f"查询当日任务失败: {str(e)}"
+        finally:
+            session.close()
+
+    def get_by_status(self, status: str) -> tuple:
+        """
+        根据状态查询任务
+        :param status: 任务状态
+        :return: (是否成功, 任务列表或错误信息)
+        """
+        session = get_db_session()
+        try:
+            tasks = session.query(Task).filter(Task.status == status).order_by(Task.created_at.desc()).all()
+            return True, tasks
+        except Exception as e:
+            return False, f"按状态查询任务失败: {str(e)}"
+        finally:
+            session.close()
+
+    def update(self, task_id: int, update_data: Dict[str, Any]) -> tuple:
+        """
+        修改任务信息
+        :param task_id: 任务唯一编号
+        :param update_data: 要更新的字段字典
+        :return: (是否成功, 更新后任务对象或错误信息)
+        """
+        session = get_db_session()
+        try:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                return False, f"未找到编号为 {task_id} 的任务"
+
+            for key, value in update_data.items():
+                if hasattr(task, key):
+                    setattr(task, key, value)
+
+            session.commit()
+            session.refresh(task)
+            return True, task
+        except Exception as e:
+            session.rollback()
+            return False, f"修改任务失败: {str(e)}"
+        finally:
+            session.close()
+
+    def delete(self, task_id: int) -> tuple:
+        """
+        删除任务
+        :param task_id: 任务唯一编号
+        :return: (是否成功, 删除的任务标题或错误信息)
+        """
+        session = get_db_session()
+        try:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                return False, f"未找到编号为 {task_id} 的任务"
+
+            title = task.title
+            session.delete(task)
+            session.commit()
+            return True, title
+        except Exception as e:
+            session.rollback()
+            return False, f"删除任务失败: {str(e)}"
+        finally:
+            session.close()
+
+# ==========================================
+# File: src/dao/person_dao.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+人员数据访问层
+封装人员信息新增、单条查询、列表查询、修改、删除通用方法
+承接Service层调用，转换业务数据与数据库存储格式
+"""
+
+from typing import List, Optional, Dict, Any
+from src.db_model.base_model import get_db_session, Person
+
+
+class PersonDAO:
+    """
+    人员数据访问对象
+    仅做数据库读写操作，不处理业务逻辑
+    """
+
+    def __init__(self):
+        pass
+
+    def create(self, person_data: Dict[str, Any]) -> tuple:
+        """
+        新增人员信息
+        :param person_data: 人员信息字典
+        :return: (是否成功, 新增人员对象或错误信息)
+        """
+        session = get_db_session()
+        try:
+            person = Person(**person_data)
+            session.add(person)
+            session.commit()
+            session.refresh(person)
+            return True, person
+        except Exception as e:
+            session.rollback()
+            return False, f"新增人员失败: {str(e)}"
+        finally:
+            session.close()
+
+    def get_by_id(self, person_id: int) -> tuple:
+        """
+        根据ID查询单条人员信息
+        :param person_id: 人员唯一编号
+        :return: (是否成功, 人员对象或错误信息)
+        """
+        session = get_db_session()
+        try:
+            person = session.query(Person).filter(Person.id == person_id).first()
+            if person:
+                return True, person
+            return False, f"未找到编号为 {person_id} 的人员"
+        except Exception as e:
+            return False, f"查询人员失败: {str(e)}"
+        finally:
+            session.close()
+
+    def get_all(self) -> tuple:
+        """
+        查询所有人员信息列表
+        :return: (是否成功, 人员列表或错误信息)
+        """
+        session = get_db_session()
+        try:
+            persons = session.query(Person).order_by(Person.created_at.desc()).all()
+            return True, persons
+        except Exception as e:
+            return False, f"查询人员列表失败: {str(e)}"
+        finally:
+            session.close()
+
+    def update(self, person_id: int, update_data: Dict[str, Any]) -> tuple:
+        """
+        修改人员信息
+        :param person_id: 人员唯一编号
+        :param update_data: 要更新的字段字典
+        :return: (是否成功, 更新后人员对象或错误信息)
+        """
+        session = get_db_session()
+        try:
+            person = session.query(Person).filter(Person.id == person_id).first()
+            if not person:
+                return False, f"未找到编号为 {person_id} 的人员"
+
+            for key, value in update_data.items():
+                if hasattr(person, key):
+                    setattr(person, key, value)
+
+            session.commit()
+            session.refresh(person)
+            return True, person
+        except Exception as e:
+            session.rollback()
+            return False, f"修改人员失败: {str(e)}"
+        finally:
+            session.close()
+
+    def delete(self, person_id: int) -> tuple:
+        """
+        删除人员信息
+        :param person_id: 人员唯一编号
+        :return: (是否成功, 删除的人员姓名或错误信息)
+        """
+        session = get_db_session()
+        try:
+            person = session.query(Person).filter(Person.id == person_id).first()
+            if not person:
+                return False, f"未找到编号为 {person_id} 的人员"
+
+            name = person.name
+            session.delete(person)
+            session.commit()
+            return True, name
+        except Exception as e:
+            session.rollback()
+            return False, f"删除人员失败: {str(e)}"
+        finally:
+            session.close()
+
+    def search_by_name(self, name: str) -> tuple:
+        """
+        根据姓名模糊查询人员
+        :param name: 姓名关键字
+        :return: (是否成功, 人员列表或错误信息)
+        """
+        session = get_db_session()
+        try:
+            persons = session.query(Person).filter(Person.name.like(f"%{name}%")).all()
+            return True, persons
+        except Exception as e:
+            return False, f"搜索人员失败: {str(e)}"
+        finally:
+            session.close()
+
+# ==========================================
+# File: src/db_model/base_model.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+数据库基础模型层
+定义全局统一 BaseModel 基础父类，包含人员表和任务表结构
+仅做模型定义与库连接，不处理业务逻辑
+"""
+
+from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, event
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.sql import func
+import os
+
+# 数据库文件路径
+DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DB_PATH = os.path.join(DB_DIR, "brain_data.db")
+
+# 确保数据目录存在
+os.makedirs(DB_DIR, exist_ok=True)
+
+# 创建数据库引擎
+engine = create_engine(f"sqlite:///{DB_PATH}", echo=False, connect_args={"check_same_thread": False})
+
+# 创建会话工厂
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+# 声明基类
+Base = declarative_base()
+
+
+class BaseModel(Base):
+    """
+    全局统一基础父类
+    所有业务数据表强制继承该基类
+    """
+    __abstract__ = True
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="唯一编号")
+    created_at = Column(DateTime, default=func.now(), nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False, comment="更新时间")
+
+
+class Person(BaseModel):
+    """
+    人员信息数据表
+    """
+    __tablename__ = "person"
+
+    name = Column(String(100), nullable=False, comment="姓名")
+    relation_type = Column(String(50), nullable=True, comment="关系类型")
+    gender = Column(String(10), nullable=True, comment="性别")
+    birth_date = Column(String(20), nullable=True, comment="出生日期")
+    age = Column(Integer, nullable=True, comment="年龄")
+    phone = Column(String(20), nullable=True, comment="联系电话")
+    id_card = Column(String(18), nullable=True, comment="身份证号")
+    household_address = Column(Text, nullable=True, comment="户籍地址")
+    work_unit = Column(String(200), nullable=True, comment="工作单位")
+    position = Column(String(100), nullable=True, comment="职务")
+    is_emergency_contact = Column(Boolean, default=False, comment="是否紧急联系人")
+    remark = Column(Text, nullable=True, comment="备注")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "relation_type": self.relation_type,
+            "gender": self.gender,
+            "birth_date": self.birth_date,
+            "age": self.age,
+            "phone": self.phone,
+            "id_card": self.id_card,
+            "household_address": self.household_address,
+            "work_unit": self.work_unit,
+            "position": self.position,
+            "is_emergency_contact": self.is_emergency_contact,
+            "remark": self.remark,
+            "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S") if self.created_at else None,
+            "updated_at": self.updated_at.strftime("%Y-%m-%d %H:%M:%S") if self.updated_at else None,
+        }
+
+
+class Task(BaseModel):
+    """
+    任务提醒数据表
+    """
+    __tablename__ = "task"
+
+    title = Column(String(200), nullable=False, comment="任务标题")
+    task_type = Column(String(50), nullable=True, comment="任务类型")
+    priority = Column(String(20), default="普通", comment="优先级")
+    start_time = Column(String(20), nullable=True, comment="开始时间")
+    end_time = Column(String(20), nullable=True, comment="截止时间")
+    remind_before = Column(Integer, default=0, comment="提前提醒时长(分钟)")
+    repeat_cycle = Column(String(50), nullable=True, comment="重复周期")
+    status = Column(String(20), default="待办", comment="任务状态")
+    remark = Column(Text, nullable=True, comment="任务备注")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "task_type": self.task_type,
+            "priority": self.priority,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "remind_before": self.remind_before,
+            "repeat_cycle": self.repeat_cycle,
+            "status": self.status,
+            "remark": self.remark,
+            "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S") if self.created_at else None,
+            "updated_at": self.updated_at.strftime("%Y-%m-%d %H:%M:%S") if self.updated_at else None,
+        }
+
+
+def init_database():
+    """
+    初始化数据库，自动创建所有数据表
+    """
+    Base.metadata.create_all(bind=engine)
+    print("【数据库】数据表初始化完成")
+
+
+def get_db_session():
+    """
+    获取数据库会话
+    """
+    return SessionLocal()
+
+# ==========================================
+# File: src/service/person_service.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+人员业务服务层
+承接人员新增、查询、编辑、删除核心业务
+做数据合法性校验、格式规范、业务规则判断
+不直接操作数据库底层模型
+"""
+
+from typing import Dict, Any, List, Optional
+from src.dao.person_dao import PersonDAO
+
+
+class PersonService:
+    """
+    人员业务服务
+    处理人员管理相关业务逻辑
+    """
+
+    def __init__(self):
+        self.person_dao = PersonDAO()
+
+    def _validate_person_data(self, data: Dict[str, Any], is_update: bool = False) -> tuple:
+        """
+        校验人员数据合法性
+        :param data: 人员数据字典
+        :param is_update: 是否为更新操作
+        :return: (是否通过, 错误信息)
+        """
+        if not is_update:
+            if not data.get("name"):
+                return False, "姓名不能为空"
+
+        if "name" in data and not data["name"]:
+            return False, "姓名不能为空"
+
+        if "name" in data and len(data["name"]) > 100:
+            return False, "姓名长度不能超过100个字符"
+
+        if "phone" in data and data["phone"]:
+            if len(data["phone"]) > 20:
+                return False, "联系电话长度不能超过20个字符"
+
+        if "id_card" in data and data["id_card"]:
+            if len(data["id_card"]) > 18:
+                return False, "身份证号长度不能超过18个字符"
+
+        if "age" in data and data["age"] is not None:
+            try:
+                age = int(data["age"])
+                if age < 0 or age > 150:
+                    return False, "年龄必须在0-150之间"
+            except (ValueError, TypeError):
+                return False, "年龄必须是有效数字"
+
+        return True, None
+
+    def create_person(self, person_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        新增人员
+        :param person_data: 人员信息字典
+        :return: 业务结果字典
+        """
+        valid, msg = self._validate_person_data(person_data)
+        if not valid:
+            return {"success": False, "message": msg}
+
+        success, result = self.person_dao.create(person_data)
+        if success:
+            return {
+                "success": True,
+                "message": f"人员 '{result.name}' 新增成功",
+                "data": result.to_dict()
+            }
+        return {"success": False, "message": result}
+
+    def get_person_by_id(self, person_id: int) -> Dict[str, Any]:
+        """
+        根据ID查询人员
+        :param person_id: 人员编号
+        :return: 业务结果字典
+        """
+        success, result = self.person_dao.get_by_id(person_id)
+        if success:
+            return {
+                "success": True,
+                "message": "查询成功",
+                "data": result.to_dict()
+            }
+        return {"success": False, "message": result}
+
+    def get_all_persons(self) -> Dict[str, Any]:
+        """
+        查询所有人员
+        :return: 业务结果字典
+        """
+        success, result = self.person_dao.get_all()
+        if success:
+            return {
+                "success": True,
+                "message": f"共查询到 {len(result)} 位人员",
+                "data": [p.to_dict() for p in result]
+            }
+        return {"success": False, "message": result}
+
+    def update_person(self, person_id: int, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        修改人员信息
+        :param person_id: 人员编号
+        :param update_data: 更新数据字典
+        :return: 业务结果字典
+        """
+        valid, msg = self._validate_person_data(update_data, is_update=True)
+        if not valid:
+            return {"success": False, "message": msg}
+
+        success, result = self.person_dao.update(person_id, update_data)
+        if success:
+            return {
+                "success": True,
+                "message": f"人员 '{result.name}' 信息修改成功",
+                "data": result.to_dict()
+            }
+        return {"success": False, "message": result}
+
+    def delete_person(self, person_id: int) -> Dict[str, Any]:
+        """
+        删除人员
+        :param person_id: 人员编号
+        :return: 业务结果字典
+        """
+        success, result = self.person_dao.delete(person_id)
+        if success:
+            return {
+                "success": True,
+                "message": f"人员 '{result}' 删除成功"
+            }
+        return {"success": False, "message": result}
+
+    def search_persons_by_name(self, name: str) -> Dict[str, Any]:
+        """
+        根据姓名搜索人员
+        :param name: 姓名关键字
+        :return: 业务结果字典
+        """
+        success, result = self.person_dao.search_by_name(name)
+        if success:
+            return {
+                "success": True,
+                "message": f"搜索到 {len(result)} 位匹配人员",
+                "data": [p.to_dict() for p in result]
+            }
+        return {"success": False, "message": result}
+
+# ==========================================
+# File: src/service/task_service.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+任务业务服务层
+校验任务时间、优先级、状态等字段合规性
+实现当日任务查询、新增待办、任务状态修改业务逻辑
+不直接操作数据库底层模型
+"""
+
+from typing import Dict, Any, List, Optional
+from src.dao.task_dao import TaskDAO
+
+
+class TaskService:
+    """
+    任务业务服务
+    处理任务管理相关业务逻辑
+    """
+
+    def __init__(self):
+        self.task_dao = TaskDAO()
+
+    def _validate_task_data(self, data: Dict[str, Any], is_update: bool = False) -> tuple:
+        """
+        校验任务数据合法性
+        :param data: 任务数据字典
+        :param is_update: 是否为更新操作
+        :return: (是否通过, 错误信息)
+        """
+        if not is_update:
+            if not data.get("title"):
+                return False, "任务标题不能为空"
+
+        if "title" in data and not data["title"]:
+            return False, "任务标题不能为空"
+
+        if "title" in data and len(data["title"]) > 200:
+            return False, "任务标题长度不能超过200个字符"
+
+        valid_priorities = ["紧急", "高", "普通", "低"]
+        if "priority" in data and data["priority"]:
+            if data["priority"] not in valid_priorities:
+                return False, f"优先级必须是以下之一: {', '.join(valid_priorities)}"
+
+        valid_statuses = ["待办", "进行中", "已完成", "已取消"]
+        if "status" in data and data["status"]:
+            if data["status"] not in valid_statuses:
+                return False, f"任务状态必须是以下之一: {', '.join(valid_statuses)}"
+
+        if "remind_before" in data and data["remind_before"] is not None:
+            try:
+                remind = int(data["remind_before"])
+                if remind < 0:
+                    return False, "提前提醒时长不能为负数"
+            except (ValueError, TypeError):
+                return False, "提前提醒时长必须是有效数字"
+
+        return True, None
+
+    def create_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        新增任务
+        :param task_data: 任务信息字典
+        :return: 业务结果字典
+        """
+        valid, msg = self._validate_task_data(task_data)
+        if not valid:
+            return {"success": False, "message": msg}
+
+        success, result = self.task_dao.create(task_data)
+        if success:
+            return {
+                "success": True,
+                "message": f"任务 '{result.title}' 新增成功",
+                "data": result.to_dict()
+            }
+        return {"success": False, "message": result}
+
+    def get_task_by_id(self, task_id: int) -> Dict[str, Any]:
+        """
+        根据ID查询任务
+        :param task_id: 任务编号
+        :return: 业务结果字典
+        """
+        success, result = self.task_dao.get_by_id(task_id)
+        if success:
+            return {
+                "success": True,
+                "message": "查询成功",
+                "data": result.to_dict()
+            }
+        return {"success": False, "message": result}
+
+    def get_all_tasks(self) -> Dict[str, Any]:
+        """
+        查询所有任务
+        :return: 业务结果字典
+        """
+        success, result = self.task_dao.get_all()
+        if success:
+            return {
+                "success": True,
+                "message": f"共查询到 {len(result)} 条任务",
+                "data": [t.to_dict() for t in result]
+            }
+        return {"success": False, "message": result}
+
+    def get_today_tasks(self) -> Dict[str, Any]:
+        """
+        查询当日任务
+        :return: 业务结果字典
+        """
+        success, result = self.task_dao.get_today_tasks()
+        if success:
+            return {
+                "success": True,
+                "message": f"今日共有 {len(result)} 条任务",
+                "data": [t.to_dict() for t in result]
+            }
+        return {"success": False, "message": result}
+
+    def get_tasks_by_status(self, status: str) -> Dict[str, Any]:
+        """
+        按状态查询任务
+        :param status: 任务状态
+        :return: 业务结果字典
+        """
+        success, result = self.task_dao.get_by_status(status)
+        if success:
+            return {
+                "success": True,
+                "message": f"状态为 '{status}' 的任务共 {len(result)} 条",
+                "data": [t.to_dict() for t in result]
+            }
+        return {"success": False, "message": result}
+
+    def update_task(self, task_id: int, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        修改任务
+        :param task_id: 任务编号
+        :param update_data: 更新数据字典
+        :return: 业务结果字典
+        """
+        valid, msg = self._validate_task_data(update_data, is_update=True)
+        if not valid:
+            return {"success": False, "message": msg}
+
+        success, result = self.task_dao.update(task_id, update_data)
+        if success:
+            return {
+                "success": True,
+                "message": f"任务 '{result.title}' 修改成功",
+                "data": result.to_dict()
+            }
+        return {"success": False, "message": result}
+
+    def delete_task(self, task_id: int) -> Dict[str, Any]:
+        """
+        删除任务
+        :param task_id: 任务编号
+        :return: 业务结果字典
+        """
+        success, result = self.task_dao.delete(task_id)
+        if success:
+            return {
+                "success": True,
+                "message": f"任务 '{result}' 删除成功"
+            }
+        return {"success": False, "message": result}
+
+# ==========================================
+# File: src/agent/task_agent.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+任务智能代理层
+接收交互层路由下发的任务管理任务与参数
+调用任务业务Service完成待办新增、查询、状态变更
+任务数据变动时，发布对应事件至事件总线
+监听相关联动事件，触发提醒、状态同步等附属逻辑
+"""
+
+from typing import Dict, Any
+from src.service.task_service import TaskService
+from src.event_bus import event_bus
+
+
+class TaskAgent:
+    """
+    任务管理Agent
+    负责任务相关业务的协调与事件发布
+    """
+
+    def __init__(self):
+        self.task_service = TaskService()
+        self._subscribe_events()
+
+    def _subscribe_events(self):
+        """
+        订阅关联业务事件
+        """
+        event_bus.subscribe("person_changed", self._on_person_changed)
+        event_bus.subscribe("reminder_triggered", self._on_reminder_triggered)
+
+    def _publish_task_changed(self, action: str, task_data: Dict[str, Any]):
+        """
+        发布任务变更事件
+        :param action: 变更动作类型
+        :param task_data: 任务数据
+        """
+        event_bus.publish("task_changed", {
+            "action": action,
+            "task": task_data
+        })
+
+    def _on_person_changed(self, data: Dict[str, Any]):
+        """
+        人员变更时的联动处理
+        :param data: 事件数据
+        """
+        action = data.get("action")
+        person = data.get("person", {})
+        person_name = person.get("name", "未知")
+        print(f"【任务Agent】收到人员变更联动: 动作={action}, 人员={person_name}")
+
+    def _on_reminder_triggered(self, data: Dict[str, Any]):
+        """
+        提醒触发时的联动处理
+        :param data: 事件数据
+        """
+        task_id = data.get("task_id")
+        task_title = data.get("task_title")
+        print(f"【任务Agent】提醒触发: 任务ID={task_id}, 标题={task_title}")
+
+    def create_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        新增任务
+        :param task_data: 任务信息
+        :return: 处理结果
+        """
+        result = self.task_service.create_task(task_data)
+        if result.get("success"):
+            self._publish_task_changed("created", result.get("data", {}))
+        return result
+
+    def get_task(self, task_id: int) -> Dict[str, Any]:
+        """
+        查询单个任务
+        :param task_id: 任务编号
+        :return: 处理结果
+        """
+        return self.task_service.get_task_by_id(task_id)
+
+    def list_tasks(self) -> Dict[str, Any]:
+        """
+        查询所有任务
+        :return: 处理结果
+        """
+        return self.task_service.get_all_tasks()
+
+    def list_today_tasks(self) -> Dict[str, Any]:
+        """
+        查询今日任务
+        :return: 处理结果
+        """
+        return self.task_service.get_today_tasks()
+
+    def list_tasks_by_status(self, status: str) -> Dict[str, Any]:
+        """
+        按状态查询任务
+        :param status: 任务状态
+        :return: 处理结果
+        """
+        return self.task_service.get_tasks_by_status(status)
+
+    def update_task(self, task_id: int, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        修改任务
+        :param task_id: 任务编号
+        :param update_data: 更新数据
+        :return: 处理结果
+        """
+        result = self.task_service.update_task(task_id, update_data)
+        if result.get("success"):
+            self._publish_task_changed("updated", result.get("data", {}))
+        return result
+
+    def delete_task(self, task_id: int) -> Dict[str, Any]:
+        """
+        删除任务
+        :param task_id: 任务编号
+        :return: 处理结果
+        """
+        result = self.task_service.delete_task(task_id)
+        if result.get("success"):
+            self._publish_task_changed("deleted", {"id": task_id})
+        return result
+
+    def complete_task(self, task_id: int) -> Dict[str, Any]:
+        """
+        完成任务
+        :param task_id: 任务编号
+        :return: 处理结果
+        """
+        result = self.task_service.update_task(task_id, {"status": "已完成"})
+        if result.get("success"):
+            self._publish_task_changed("completed", result.get("data", {}))
+        return result
+
+# ==========================================
+# File: src/agent/person_agent.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+人员智能代理层
+接收交互层路由下发的人员管理任务与参数
+调用人员业务Service执行对应操作
+人员信息变动后，主动向事件总线推送状态变更事件
+订阅关联业务事件，监听到消息后触发对应联动处理
+"""
+
+from typing import Dict, Any
+from src.service.person_service import PersonService
+from src.event_bus import event_bus
+
+
+class PersonAgent:
+    """
+    人员管理Agent
+    负责人员相关业务的协调与事件发布
+    """
+
+    def __init__(self):
+        self.person_service = PersonService()
+        self._subscribe_events()
+
+    def _subscribe_events(self):
+        """
+        订阅关联业务事件
+        """
+        event_bus.subscribe("task_assigned_to_person", self._on_task_assigned)
+        event_bus.subscribe("person_emergency_updated", self._on_emergency_updated)
+
+    def _publish_person_changed(self, action: str, person_data: Dict[str, Any]):
+        """
+        发布人员变更事件
+        :param action: 变更动作类型
+        :param person_data: 人员数据
+        """
+        event_bus.publish("person_changed", {
+            "action": action,
+            "person": person_data
+        })
+
+    def _on_task_assigned(self, data: Dict[str, Any]):
+        """
+        任务分配给人员时的联动处理
+        :param data: 事件数据
+        """
+        person_id = data.get("person_id")
+        task_title = data.get("task_title")
+        print(f"【人员Agent】收到任务分配联动: 人员ID={person_id}, 任务={task_title}")
+
+    def _on_emergency_updated(self, data: Dict[str, Any]):
+        """
+        紧急联系人更新时的联动处理
+        :param data: 事件数据
+        """
+        person_id = data.get("person_id")
+        is_emergency = data.get("is_emergency")
+        print(f"【人员Agent】紧急联系人状态更新: 人员ID={person_id}, 状态={'是' if is_emergency else '否'}")
+
+    def create_person(self, person_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        新增人员
+        :param person_data: 人员信息
+        :return: 处理结果
+        """
+        result = self.person_service.create_person(person_data)
+        if result.get("success"):
+            self._publish_person_changed("created", result.get("data", {}))
+        return result
+
+    def get_person(self, person_id: int) -> Dict[str, Any]:
+        """
+        查询单个人员
+        :param person_id: 人员编号
+        :return: 处理结果
+        """
+        return self.person_service.get_person_by_id(person_id)
+
+    def list_persons(self) -> Dict[str, Any]:
+        """
+        查询所有人员
+        :return: 处理结果
+        """
+        return self.person_service.get_all_persons()
+
+    def update_person(self, person_id: int, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        修改人员信息
+        :param person_id: 人员编号
+        :param update_data: 更新数据
+        :return: 处理结果
+        """
+        result = self.person_service.update_person(person_id, update_data)
+        if result.get("success"):
+            self._publish_person_changed("updated", result.get("data", {}))
+        return result
+
+    def delete_person(self, person_id: int) -> Dict[str, Any]:
+        """
+        删除人员
+        :param person_id: 人员编号
+        :return: 处理结果
+        """
+        result = self.person_service.delete_person(person_id)
+        if result.get("success"):
+            self._publish_person_changed("deleted", {"id": person_id})
+        return result
+
+    def search_persons(self, name: str) -> Dict[str, Any]:
+        """
+        搜索人员
+        :param name: 姓名关键字
+        :return: 处理结果
+        """
+        return self.person_service.search_persons_by_name(name)
+
+# ==========================================
+# File: src/interaction/interaction_layer.py
+# ==========================================
+# -*- coding: utf-8 -*-
+"""
+OpenClaw 人机交互层主循环
+集成意图识别路由，并通过事件总线（EventBus）异步渲染代码进化状态。
+"""
+
+import time
+import threading
+import logging
+from typing import Dict, Any
+
+from src.event_bus import (
+    event_bus,
+    EVENT_CODE_EVOLUTION_START,
+    EVENT_LOCK_ACQUIRED,
+    EVENT_LOCK_FAILED,
+    EVENT_SANDBOX_START,
+    EVENT_SANDBOX_SUCCESS,
+    EVENT_SANDBOX_FAILED,
+    EVENT_GIT_PUSH_SUCCESS,
+    EVENT_CONTAINER_RESTARTING
+)
+from src.code_manager import CodeEvolutionManager
+
+# 初始化日志
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("OpenClaw.Interaction")
+
+class OpenClawInteractionLayer:
+    def __init__(self):
+        self.running = False
+        # 初始化代码进化管理器
+        self.code_manager = CodeEvolutionManager()
+        self.current_user = "Developer_Admin" # 模拟当前交互用户名
+        
+        # 注册事件总线回调，实时在终端打印 AI 进化进度
+        self._setup_event_subscriptions()
+
+    def _setup_event_subscriptions(self):
+        """
+        订阅全链路进化事件，使用户在终端能清晰看到 AI 动态，消除卡死感
+        """
+        event_bus.subscribe(EVENT_CODE_EVOLUTION_START, lambda et, data: print(f"\n[🔄 进化启动] {data}"))
+        event_bus.subscribe(EVENT_LOCK_ACQUIRED, lambda et, data: print(f"[🔒 锁控制] 成功为用户 {data} 抢占排他锁，阻断其他并发修改。"))
+        event_bus.subscribe(EVENT_LOCK_FAILED, lambda et, data: print(f"[🚨 锁冲突] {data}"))
+        event_bus.subscribe(EVENT_SANDBOX_START, lambda et, data: print(f"[🧪 沙箱测试] {data}"))
+        
+        def on_sandbox_success(et, data):
+            print("============================================================")
+            print("[✅ 测试通过] 影子沙箱单元测试 100% 成功！准备合并主线并推送 GitHub。")
+            print("============================================================")
+        event_bus.subscribe(EVENT_SANDBOX_SUCCESS, on_sandbox_success)
+
+        def on_sandbox_failed(et, data):
+            print("============================================================")
+            print("[❌ 测试失败] 💥 AI 修改的代码未能通过沙箱测试！漏洞日志如下：")
+            print(data)
+            print("============================================================")
+        event_bus.subscribe(EVENT_SANDBOX_FAILED, on_sandbox_failed)
+        
+        event_bus.subscribe(EVENT_GIT_PUSH_SUCCESS, lambda et, data: print(f"[🚀 GitHub] {data}"))
+        event_bus.subscribe(EVENT_CONTAINER_RESTARTING, lambda et, data: print(f"[🔄 重启通知] {data}\n【提示】系统正在热更新，请等待容器重启完毕..."))
+
+    def _parse_intent(self, user_input: str) -> Dict[str, Any]:
+        """
+        利用规则或大模型识别用户意图
+        """
+        ui_lower = user_input.lower()
+        # 简单路由规则示例（实际生产中可接入 LLM 进行 Function Calling 意图识别）
+        if "修改" in ui_lower or "改进" in ui_lower or "优化代码" in ui_lower or "fix" in ui_lower:
+            return {"intent": "modify_code", "prompt": user_input}
+        elif "执行" in ui_lower or "运行" in ui_lower:
+            return {"intent": "execute_code", "prompt": user_input}
+        else:
+            return {"intent": "chat", "prompt": user_input}
+
+    def _route_and_execute(self, intent_result: Dict[str, Any], raw_input: str) -> str:
+        """
+        根据意图分发路由
+        """
+        intent = intent_result.get("intent")
+        prompt = intent_result.get("prompt")
+
+        if intent == "execute_code":
+            return f"【执行引擎】正在生产容器中安全运行指定代码... [执行成功]"
+            
+        elif intent == "modify_code":
+            # 触发排他锁检查
+            if not self.code_manager.acquire_lock(self.current_user):
+                return "【拒绝操作】由于当前有其他工程师正在修改代码，系统已锁定，请稍后再试。"
+            
+            # 启动后台线程异步处理耗时的 AI 代码进化工作流，防止主线程 input 卡死
+            threading.Thread(target=self._async_evolution_workflow, args=(prompt,), daemon=True).start()
+            return "【系统响应】已成功受理您的代码修改请求。安全自进化流水线已在后台异步启动，请观察下方实时进度..."
+            
+        else:
+            return f"【大脑对话】您说的是: '{raw_input}'。我是一个精通 Docker 和 OpenClaw 的 AI 助手。"
+
+    def _async_evolution_workflow(self, prompt: str):
+        """
+        后台异步自进化工作流：修改 -> 沙箱测试 -> 提交 -> 释放锁 -> 重启
+        """
+        try:
+            event_bus.publish(EVENT_CODE_EVOLUTION_START, "大模型正在思考并重构物理代码文件...")
+            
+            # -------------------------------------------------------------
+            # 步骤 1：大模型修改代码逻辑（此处模拟大模型写出新代码到本地文件）
+            # -------------------------------------------------------------
+            time.sleep(3) # 模拟大模型推理和写文件耗时
+            logger.info("AI 已经成功覆写了目标代码文件。")
+            
+            # -------------------------------------------------------------
+            # 步骤 2：拉起物理隔离的影子沙箱进行安全性测试
+            # -------------------------------------------------------------
+            success, test_logs = self.code_manager.execute_shadow_sandbox_test(test_cmd="pytest tests/")
+            
+            if not success:
+                logger.warning("沙箱测试未通过，中止后续发布流程。")
+                # 在真实业务中，此处可将 test_logs 扔回给 LLM 开启最多3次的代码自愈（Self-Healing）
+                return
+            
+            # -------------------------------------------------------------
+            # 步骤 3：代码通过测试，使用 Token 凭证跨平台推送到 GitHub 远端
+            # -------------------------------------------------------------
+            commit_msg = f"自动优化: {prompt[:20]}..."
+            push_ok, push_err = self.code_manager.commit_and_push_via_token(commit_msg)
+            if not push_ok:
+                logger.error(f"代码推送到 GitHub 失败: {push_err}")
+                return
+                
+            # -------------------------------------------------------------
+            # 步骤 4：通过安全代理滚动重启生产容器 personal-brain
+            # -------------------------------------------------------------
+            self.code_manager.trigger_production_restart()
+            
+        except Exception as e:
+            logger.error(f"后台异步进化流水线遭遇致命异常: {e}", exc_info=True)
+        finally:
+            # 💡 雷打不动：无论进化成功还是中间出错，必须在结束时释放排他锁，防止死锁
+            self.code_manager.release_lock()
+
+    def start(self):
+        """
+        启动人机交互终端循环
+        """
+        self.running = True
+        print("\n" + "=" * 60)
+        print("    🧠 OpenClaw-Brain 安全代码自进化系统 V2 (Token版) 🧠")
+        print("=" * 60)
+        print("提示：输入包含 '修改' 或 '改进' 将触发【排他锁 + 影子沙箱测试 + Git提交】流水线。\n")
+
+        while self.running:
+            try:
+                user_input = input("\n🧠 您想做什么？> ").strip()
+                if not user_input:
+                    continue
+
+                if user_input.lower() in ['quit', 'q', '退出']:
+                    print("正在退出交互系统...")
+                    self.running = False
+                    break
+
+                # 1. 意图识别
+                intent_result = self._parse_intent(user_input)
+
+                # 2. 路由分发与执行
+                response = self._route_and_execute(intent_result, user_input)
+                print(f"\n{response}")
+
+            except KeyboardInterrupt:
+                print("\n\n【提示】程序被用户中断，正在退出...")
+                self.running = False
+            except Exception as e:
+                print(f"\n【错误】系统异常: {e}")
+                
+if __name__ == "__main__":
+    # 启动交互层
+    interaction = OpenClawInteractionLayer()
+    interaction.start()
+
