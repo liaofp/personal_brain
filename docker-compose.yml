@@ -4,6 +4,7 @@ services:
     image: crpi-2fu2kfwgnevmjwlu.cn-beijing.personal.cr.aliyuncs.com/openclaw_gateway/openclaw:latest
     container_name: openclaw_gateway
     restart: always
+    user: root
     ports:
       - "${OPENCLAW_PORT}:8080"
     environment:
@@ -23,9 +24,10 @@ services:
       - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
       - ${HOST_PROJECT_PATH:-.}/opencode-executor:/home/node/.openclaw/plugins/opencode-executor
       - ${SKILLS_DIR:-./skills}/personal-brain-guard:/home/node/.openclaw/skills/personal-brain-guard:ro
+      - ${DOCKER_BIN:-/usr/bin/docker}:/usr/local/bin/docker:ro
     env_file:
       - .env
-
+ 
   # 2. 运行面与控制面合一：personal_brain 核心业务容器
   personal-brain-runtime:
     build:
