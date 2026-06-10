@@ -115,6 +115,7 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
         'run', '--rm',
         '-v', `${hostProjectPath}:/workspace/${projectName}`,
         '-v', `${dockerSockPath}:/var/run/docker.sock`, 
+        '-v', `${hostProjectPath}/opencode_config.json:/root/.config/opencode/config.json:ro`,
         '-e', `DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY}`, 
         '-e', `DEEPSEEK_BASE_URL=${process.env.DEEPSEEK_BASE_URL}`,
         '-e', `DEEPSEEK_MODEL=${process.env.DEEPSEEK_MODEL}`,

@@ -7,7 +7,7 @@
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from event_bus import NewEventBus
+from src.event_bus import NewEventBus
 from src.db_model.base_model import get_db_session, Task
 
 

@@ -8,6 +8,7 @@
 
 from typing import Dict, Any, List, Optional
 from src.dao.task_dao import TaskDAO
+from src.event_bus import event_bus
 
 
 class TaskService:
@@ -17,7 +18,7 @@ class TaskService:
     """
 
     def __init__(self):
-        self.task_dao = TaskDAO()
+        self.task_dao = TaskDAO(event_bus)
 
     def _validate_task_data(self, data: Dict[str, Any], is_update: bool = False) -> tuple:
         """
