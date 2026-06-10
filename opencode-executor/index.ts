@@ -1,5 +1,6 @@
 import { BasePlugin, PluginContext, ToolExecuteResult } from '@openclaw/plugin-sdk';
 import { execSync, spawn } from 'child_process';
+import path from 'path';
 
 // ── 超时常量（毫秒）──────────────────────────────────────────
 const TIMEOUT_DOCKER_STOP_MS  = 30_000; 
@@ -30,7 +31,8 @@ function safeDockerExec(args: string[], timeoutMs: number, label: string): void 
       );
     }
     // 其他错误（容器不存在、守护进程未启动等）原样抛出，附加上下文
-    throw new Error(`[${label}] docker 命令执行失败: ${cmd}\n原因: ${err.message}`);
+    const errorDetail = err.stderr ? err.stderr.toString().trim() : err.message;
+    throw new Error(`[${label}] docker 命令执行失败: ${cmd}\n底层原因: ${errorDetail}`);    
   }
 }
 
@@ -65,18 +67,20 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
     });
 
     // ── 环境变量读取 ──────────────────────────────────────────
-    const hostProjectPath    = process.env.HOST_PROJECT_PATH;
+    const hostProjectPath    = process.env.HOST_PROJECT_PATH; 
     const dockerSockPath     = process.env.DOCKER_SOCK_PATH || '/var/run/docker.sock';
-    const productionContainer = process.env.PRODUCTION_CONTAINER_NAME || 'personal_brain_runtime';
-    const openCodeImage      = process.env.OPENCODE_IMAGE;
+    const productionContainer = process.env.PRODUCTION_CONTAINER_NAME || 'personal_brain_runtime'; 
+    const openCodeImage      = process.env.OPENCODE_IMAGE; 
 
     if (!hostProjectPath || !openCodeImage) {
-      this.isEvolving = false;
+      this.isEvolving = false; 
       return {
         success: false,
-        error: '配置项缺失：请检查 .env 中的 HOST_PROJECT_PATH 和 OPENCODE_IMAGE',
+        error: '配置项缺失：请检查 .env 中的 HOST_PROJECT_PATH 和 OPENCODE_IMAGE', 
       };
     }
+
+    const projectName = path.basename(hostProjectPath.trim()); 
 
     try {
       // ── Step 1: 优雅停止业务容器，释放 SQLite 文件锁 ─────────
@@ -105,22 +109,22 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
       }
 
       // ── Step 2: 拉起 OpenCode 专家容器执行代码进化 ────────────
-      context.emit('stream:data', {
-        chunk: `🤖 [控制面安全调度] 正在拉起全能型 OpenCode 专家容器，进入工作区执行 [取-规-改-测-交] 全闭环...\n\n`,
-      });
+      context.emit('stream:data', { chunk: `🤖 [控制面安全调度] 正在拉起全能型 OpenCode 专家容器，进入工作区 [${projectName}] 执行进化...\n\n`, });
 
       const dockerArgs: string[] = [
         'run', '--rm',
-        '-v', `${hostProjectPath}:/workspace`,
-        '-v', `${dockerSockPath}:/var/run/docker.sock`,
-        '-e', `DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY}`,
+        '-v', `${hostProjectPath}:/workspace/${projectName}`,
+        '-v', `${dockerSockPath}:/var/run/docker.sock`, 
+        '-e', `DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY}`, 
         '-e', `DEEPSEEK_BASE_URL=${process.env.DEEPSEEK_BASE_URL}`,
         '-e', `DEEPSEEK_MODEL=${process.env.DEEPSEEK_MODEL}`,
         '-e', `GITHUB_TOKEN=${process.env.GITHUB_TOKEN}`,
-        '-e', `GITHUB_REPO_URL=${process.env.GITHUB_REPO_URL}`,
-        '-e', `GIT_AUTHOR_NAME=${process.env.GIT_AUTHOR_NAME}`,
-        '-e', `GIT_AUTHOR_EMAIL=${process.env.GIT_AUTHOR_EMAIL}`,
-        '-w', '/workspace',
+        '-e', `GITHUB_REPO_URL=${process.env.GITHUB_REPO_URL || ''}`,
+        '-e', `GIT_AUTHOR_NAME=${process.env.GIT_AUTHOR_NAME || 'OpenCode-Agent'}`,
+        '-e', `GIT_AUTHOR_EMAIL=${process.env.GIT_AUTHOR_EMAIL || 'agent@openclaw.local'}`,
+        '-e', `PROJECT_NAME=${projectName}`,
+        '-e', `REPO_NAME=${projectName}`,
+        '-w', `/workspace/${projectName}`,
         openCodeImage,
         'opencode-agent', '--target', target_file, '--instruction', instruction,
       ];
@@ -129,6 +133,11 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
       // spawn 本身是异步的，不需要额外超时保护（OpenCode 自身应有任务超时机制）
       await new Promise<void>((resolve, reject) => {
         const opencodeProcess = spawn('docker', dockerArgs);
+
+        const timeoutTimer = setTimeout(() => {
+          opencodeProcess.kill('SIGKILL');
+          reject(new Error(`OpenCode 演进任务超过生产安全时限（${TIMEOUT_OPENCODE_TASK_MS / 60000}分钟），已被强制终止。`));
+        }, TIMEOUT_OPENCODE_TASK_MS);
 
         opencodeProcess.stdout.on('data', (data: Buffer) => {
           context.emit('stream:data', { chunk: data.toString() });
@@ -139,6 +148,7 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
         });
 
         opencodeProcess.on('close', (code: number | null) => {
+          clearTimeout(timeoutTimer);
           if (code === 0) {
             resolve();
           } else {
@@ -149,6 +159,7 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
         });
 
         opencodeProcess.on('error', (err: Error) => {
+          clearTimeout(timeoutTimer);
           reject(new Error(`无法启动 OpenCode 容器进程: ${err.message}`));
         });
       });
@@ -182,6 +193,14 @@ export default class OpenCodeOrchestratorPlugin extends BasePlugin {
       return { success: false, error: error.message };
 
     } finally {
+      try {
+        context.emit('stream:data', { chunk: `🧹 [系统自净] 正在静默清理 OpenCode 演进产生的临时卷与虚悬镜像...\n` });
+        safeDockerExec(['system', 'prune', '-f', '--volumes'], TIMEOUT_DOCKER_PRUNE_MS, 'docker-prune');
+        context.emit('stream:data', { chunk: `✨ 宿主机 Docker 环境清理完毕。\n` });
+      } catch (pruneErr: any) {
+        // prune 失败不应阻断代码主链路，记录一条 warn 日志即可
+        context.logger.warn(`[系统自净] 静默清理失败（非致命）: ${pruneErr.message}`);
+      }
       this.isEvolving = false;
     }
 
