@@ -1,0 +1,16 @@
+{
+  "id": "opencode-executor",
+  "name": "OpenCode Code Execution Executor",
+  "description": "Provides sandboxed local multi-language code interpretation and evolution utilities.",
+  "contracts": {
+    "tools": ["execute_code", "patch_repository"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sandboxRoot": { "type": "string" },
+      "timeoutMs": { "type": "integer", "default": 30000 }
+    }
+  }
+}

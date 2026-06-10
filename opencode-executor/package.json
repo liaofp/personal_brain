@@ -1,0 +1,13 @@
+{
+  "name": "@personal-brain/opencode-executor",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.ts",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": {
+      "pluginApi": ">=2026.3.24",
+      "minGatewayVersion": "2026.3.24"
+    }
+  }
+}

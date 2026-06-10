@@ -5,13 +5,24 @@ services:
     container_name: openclaw_gateway
     restart: always
     ports:
-      - "${OPENCLAW_PORT}:8000"
+      - "${OPENCLAW_PORT}:8080"
     environment:
-      - OPENCLAW_CONFIG=/root/.openclaw/openclaw.json
+      - HOME=/home/node
+      - OPENCLAW_HOME=/home/node
+      - OPENCLAW_STATE_DIR=/home/node/.openclaw
+      - OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json
+      - OPENCLAW_CONFIG_DIR=/home/node/.openclaw
+      - OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace
+      - OPENCLAW_SKIP_SERVICE_CHECK=true
+      - ALLOW_UNCONFIGURED=true
+      - NODE_ENV=development
+      - OPENCLAW_DEV=true
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
     volumes:
-      - ${HOST_PROJECT_PATH}/openclaw.json:/root/.openclaw/openclaw.json:ro
+      - ${HOST_PROJECT_PATH}/openclaw.json:/home/node/.openclaw/openclaw.json
       - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
-      - ${HOST_PROJECT_PATH:-.}/opencode-executor:/app/plugins/opencode-executor
+      - ${HOST_PROJECT_PATH:-.}/opencode-executor:/home/node/.openclaw/plugins/opencode-executor
+      - ${SKILLS_DIR:-./skills}/personal-brain-guard:/home/node/.openclaw/skills/personal-brain-guard:ro
     env_file:
       - .env
 
@@ -39,4 +50,4 @@ services:
       cd /workspace &&
       uv sync --frozen 2>/dev/null || uv sync &&
       python -m src.main
-    "
+      "

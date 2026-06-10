@@ -1,14 +1,61 @@
 {
   "gateway": {
     "mode": "local",
-    "allowUnconfigured": true,
-    "port": 8000
+    "bind": "auto",
+    "port": 8080,
+    "auth": {
+      "mode": "token"
+    },
+    "controlUi": {
+      "allowedOrigins": [
+        "*"
+      ]
+    }
   },
+
+  "auth": {
+    "profiles": {}
+  },
+
+  "models": {
+    "providers": {
+      "openai": {
+        "baseUrl": "https://api.deepseek.com/v1",
+        "apiKey": "${DEEPSEEK_API_KEY}"
+      }
+    }
+  },
+
   "plugins": {
-    "dir": "/app/plugins",
-    "autoLoad": true
+    "enabled": true,
+    "load": {
+      "paths": [
+        "/home/node/.openclaw/plugins/opencode-executor"
+      ]
+    },
+    "entries": {
+      "opencode-executor": {
+        "enabled": true,
+        "config": {
+          "sandboxRoot": "/home/node/.openclaw/workspace",
+          "timeoutMs": 60000
+        }
+      }
+    }
   },
-  "logger": {
-    "level": "info"
+
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace",
+      "skills": ["personal-brain-guard"],
+      "model": {
+        "primary": "openai/deepseek-chat",
+        "fallbacks": ["openai/deepseek-coder"]
+      },
+      "models": {
+        "openai/deepseek-chat": { "alias": "DeepSeek Chat" },
+        "openai/deepseek-coder": { "alias": "DeepSeek Coder" }
+      }
+    }
   }
 }
